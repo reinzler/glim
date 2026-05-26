@@ -4,6 +4,7 @@
 #include <vector>
 #include <Eigen/Core>
 #include <glim/util/raw_points.hpp>
+#include <glim/core/point_attributes.hpp>
 
 namespace glim {
 
@@ -29,6 +30,8 @@ public:
   std::vector<double> times;            // Point timestamps w.r.t. the first pt
   std::vector<double> intensities;      // Point intensities
   std::vector<Eigen::Vector4d> points;  // Points (homogeneous coordinates)
+
+  PointAttributes attrs;  // PR290-style attributes aligned with points
 
   int k_neighbors;             // Number of neighbors of each point
   std::vector<int> neighbors;  // k-nearest neighbors of each point

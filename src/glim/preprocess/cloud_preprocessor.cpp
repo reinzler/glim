@@ -233,6 +233,19 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess_impl(const RawPoints::Const
     preprocessed->intensities.assign(frame->intensities, frame->intensities + frame->size());
   }
 
+  // PR290-style attributes that are guaranteed to stay aligned after preprocessing.
+  preprocessed->attrs.timestamp = preprocessed->times;
+
+  if (!preprocessed->intensities.empty()) {
+    auto& dst = preprocessed->attrs.intensity.emplace();
+    dst.resize(preprocessed->intensities.size());
+    for (std::size_t i = 0; i < preprocessed->intensities.size(); i++) {
+      dst[i] = static_cast<float>(preprocessed->intensities[i]);
+    }
+  }
+
+  preprocessed->attrs.throw_if_invalid(preprocessed->size());
+
   preprocessed->k_neighbors = params.k_correspondences;
   preprocessed->neighbors = find_neighbors(frame->points, frame->size(), params.k_correspondences);
 

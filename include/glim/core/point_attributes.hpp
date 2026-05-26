@@ -7,8 +7,12 @@
 #include <vector>
 
 #include <Eigen/Core>
+#include <Eigen/StdVector>
 
 namespace glim {
+
+template <typename T>
+using AlignedVector = std::vector<T, Eigen::aligned_allocator<T>>;
 
 /**
  * @brief PR290-style per-point attribute container.
@@ -16,10 +20,10 @@ namespace glim {
  * Rule:
  *   if an attribute exists, attribute.size() must equal num_points.
  *
- * M1.1 is intentionally non-invasive:
- *   - define the standard schema
- *   - add validation helpers
- *   - do not yet rewrite RawPoints / PreprocessedFrame pipeline
+ * M1 is intentionally staged:
+ *   - M1.1: standard schema + validation helpers
+ *   - M1.2: attach attributes to RawPoints / PreprocessedFrame
+ *   - M1.3: preserve attributes through sampling/filtering/downsampling
  */
 struct PointAttributes {
   std::optional<std::vector<float>> intensity;
@@ -29,9 +33,9 @@ struct PointAttributes {
   std::optional<std::vector<std::uint8_t>> tag;
   std::optional<std::vector<std::uint8_t>> scanner_id;
 
-  std::optional<std::vector<Eigen::Vector3f>> rgb;
-  std::optional<std::vector<Eigen::Vector3f>> normals;
-  std::optional<std::vector<Eigen::Matrix3f>> covariances;
+  std::optional<AlignedVector<Eigen::Vector3f>> rgb;
+  std::optional<AlignedVector<Eigen::Vector3f>> normals;
+  std::optional<AlignedVector<Eigen::Matrix3f>> covariances;
 
   // Future MapCleaner / dynamic object pipeline.
   std::optional<std::vector<float>> static_score;

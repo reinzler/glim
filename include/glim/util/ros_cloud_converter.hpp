@@ -1,10 +1,14 @@
 #pragma once
 
+#include <algorithm>
 #include <memory>
 #include <vector>
+#include <unordered_map>
 #include <iostream>
 #include <spdlog/spdlog.h>
 #include <boost/format.hpp>
+#include <cmath>
+#include <cstdint>
 
 #include <Eigen/Core>
 #include <gtsam_points/types/point_cloud.hpp>
@@ -61,6 +65,39 @@ Eigen::Vector4d get_vec4(const void* x, const void* y, const void* z) {
   return Eigen::Vector4d(*reinterpret_cast<const T*>(x), *reinterpret_cast<const T*>(y), *reinterpret_cast<const T*>(z), 1.0);
 }
 
+static bool read_uint8_like_field(const PointCloud2& points_msg, int datatype, int offset, int point_index, std::uint8_t& out) {
+  const auto* ptr = &points_msg.data[points_msg.point_step * point_index + offset];
+
+  switch (datatype) {
+    case PointField::INT8:
+      out = static_cast<std::uint8_t>(std::clamp<int>(*reinterpret_cast<const std::int8_t*>(ptr), 0, 255));
+      return true;
+    case PointField::UINT8:
+      out = *reinterpret_cast<const std::uint8_t*>(ptr);
+      return true;
+    case PointField::INT16:
+      out = static_cast<std::uint8_t>(std::clamp<int>(*reinterpret_cast<const std::int16_t*>(ptr), 0, 255));
+      return true;
+    case PointField::UINT16:
+      out = static_cast<std::uint8_t>(std::clamp<int>(*reinterpret_cast<const std::uint16_t*>(ptr), 0, 255));
+      return true;
+    case PointField::INT32:
+      out = static_cast<std::uint8_t>(std::clamp<long>(*reinterpret_cast<const std::int32_t*>(ptr), 0L, 255L));
+      return true;
+    case PointField::UINT32:
+      out = static_cast<std::uint8_t>(std::min<std::uint32_t>(*reinterpret_cast<const std::uint32_t*>(ptr), 255U));
+      return true;
+    case PointField::FLOAT32:
+      out = static_cast<std::uint8_t>(std::clamp<int>(static_cast<int>(std::lround(*reinterpret_cast<const float*>(ptr))), 0, 255));
+      return true;
+    case PointField::FLOAT64:
+      out = static_cast<std::uint8_t>(std::clamp<long>(static_cast<long>(std::llround(*reinterpret_cast<const double*>(ptr))), 0L, 255L));
+      return true;
+    default:
+      return false;
+  }
+}
+
 static RawPoints::Ptr extract_raw_points(const PointCloud2& points_msg, const std::string& intensity_channel, const std::string& ring_channel) {
   int num_points = points_msg.width * points_msg.height;
 
@@ -71,6 +108,8 @@ static RawPoints::Ptr extract_raw_points(const PointCloud2& points_msg, const st
   int intensity_type = 0;
   int color_type = 0;
   int ring_type = 0;
+  int tag_type = 0;
+  int scanner_id_type = 0;
 
   int x_offset = -1;
   int y_offset = -1;
@@ -79,6 +118,8 @@ static RawPoints::Ptr extract_raw_points(const PointCloud2& points_msg, const st
   int intensity_offset = -1;
   int color_offset = -1;
   int ring_offset = -1;
+  int tag_offset = -1;
+  int scanner_id_offset = -1;
 
   std::unordered_map<std::string, std::pair<int*, int*>> fields;
   fields["x"] = std::make_pair(&x_type, &x_offset);
@@ -90,7 +131,12 @@ static RawPoints::Ptr extract_raw_points(const PointCloud2& points_msg, const st
   fields["timestamp"] = std::make_pair(&time_type, &time_offset);
   fields[intensity_channel] = std::make_pair(&intensity_type, &intensity_offset);
   fields["rgba"] = std::make_pair(&color_type, &color_offset);
+  fields["rgb"] = std::make_pair(&color_type, &color_offset);
   fields[ring_channel] = std::make_pair(&ring_type, &ring_offset);
+  fields["tag"] = std::make_pair(&tag_type, &tag_offset);
+  fields["scanner_id"] = std::make_pair(&scanner_id_type, &scanner_id_offset);
+  fields["scanner"] = std::make_pair(&scanner_id_type, &scanner_id_offset);
+  fields["lidar_id"] = std::make_pair(&scanner_id_type, &scanner_id_offset);
 
   for (const auto& field : points_msg.fields) {
     auto found = fields.find(field.name);
@@ -225,6 +271,66 @@ static RawPoints::Ptr extract_raw_points(const PointCloud2& points_msg, const st
           return nullptr;
       }
     }
+  }
+
+
+  // Fill PR290-style attributes from legacy fields and extra PointCloud2 channels.
+  if (!raw_points->times.empty()) {
+    raw_points->attrs.timestamp = raw_points->times;
+  }
+
+  if (!raw_points->intensities.empty()) {
+    auto& dst = raw_points->attrs.intensity.emplace();
+    dst.resize(raw_points->intensities.size());
+    for (std::size_t i = 0; i < raw_points->intensities.size(); i++) {
+      dst[i] = static_cast<float>(raw_points->intensities[i]);
+    }
+  }
+
+  if (!raw_points->rings.empty()) {
+    auto& dst = raw_points->attrs.line.emplace();
+    dst.resize(raw_points->rings.size());
+    for (std::size_t i = 0; i < raw_points->rings.size(); i++) {
+      dst[i] = static_cast<std::uint8_t>(std::clamp<int>(raw_points->rings[i], 0, 255));
+    }
+  }
+
+  if (!raw_points->colors.empty()) {
+    auto& dst = raw_points->attrs.rgb.emplace();
+    dst.resize(raw_points->colors.size());
+    for (std::size_t i = 0; i < raw_points->colors.size(); i++) {
+      dst[i] = raw_points->colors[i].template head<3>().cast<float>();
+    }
+  }
+
+  if (tag_offset >= 0) {
+    auto& dst = raw_points->attrs.tag.emplace();
+    dst.resize(num_points);
+
+    for (int i = 0; i < num_points; i++) {
+      if (!read_uint8_like_field(points_msg, tag_type, tag_offset, i, dst[i])) {
+        spdlog::warn("unsupported tag type {}", tag_type);
+        return nullptr;
+      }
+    }
+  }
+
+  if (scanner_id_offset >= 0) {
+    auto& dst = raw_points->attrs.scanner_id.emplace();
+    dst.resize(num_points);
+
+    for (int i = 0; i < num_points; i++) {
+      if (!read_uint8_like_field(points_msg, scanner_id_type, scanner_id_offset, i, dst[i])) {
+        spdlog::warn("unsupported scanner_id type {}", scanner_id_type);
+        return nullptr;
+      }
+    }
+  }
+
+  std::string attrs_error;
+  if (!raw_points->attrs.validate(raw_points->points.size(), &attrs_error)) {
+    spdlog::warn("invalid point attributes: {}", attrs_error);
+    raw_points->attrs.clear();
   }
 
   raw_points->stamp = to_sec(points_msg.header.stamp);
