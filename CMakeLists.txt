@@ -55,6 +55,8 @@ if(BUILD_WITH_CUDA)
 endif()
 
 add_library(glim SHARED
+  # safety (milestone 1)
+  src/glim/preprocess/scan_guard.cpp
   # util
   src/glim/util/config.cpp
   src/glim/util/logging.cpp
