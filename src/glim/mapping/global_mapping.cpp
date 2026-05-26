@@ -30,6 +30,7 @@
 #include <gtsam_points/cuda/stream_temp_buffer_roundrobin.hpp>
 
 #include <glim/util/config.hpp>
+#include <glim/util/pcd_exporter.hpp>
 #include <glim/util/serialization.hpp>
 #include <glim/common/imu_integration.hpp>
 #include <glim/mapping/callbacks.hpp>
@@ -632,6 +633,43 @@ void GlobalMapping::save(const std::string& path) {
 
   logger->info("saving config");
   GlobalConfig::instance()->dump(path + "/config");
+
+  logger->info("exporting merged PCD maps");
+  const auto merged_map = export_points();
+
+  if (merged_map && merged_map->size()) {
+    PCDExportStats stats;
+
+    if (save_pcd_xyz(path + "/map_xyz.pcd", *merged_map, &stats)) {
+      logger->info("exported map_xyz.pcd written={} input={}", stats.written_points, stats.input_points);
+    } else {
+      logger->warn("failed to export map_xyz.pcd");
+    }
+
+    if (merged_map->has_intensities()) {
+      if (save_pcd_xyzi(path + "/map_xyzi.pcd", *merged_map, &stats)) {
+        logger->info("exported map_xyzi.pcd written={} input={}", stats.written_points, stats.input_points);
+      } else {
+        logger->warn("failed to export map_xyzi.pcd");
+      }
+
+      if (save_pcd_xyzrgb(path + "/map_xyzrgb_intensity.pcd", *merged_map, PCDColorMode::INTENSITY, &stats)) {
+        logger->info("exported map_xyzrgb_intensity.pcd written={} input={}", stats.written_points, stats.input_points);
+      } else {
+        logger->warn("failed to export map_xyzrgb_intensity.pcd");
+      }
+    } else {
+      logger->warn("merged map has no intensities; skip XYZI and intensity-colored PCD export");
+    }
+
+    if (save_pcd_xyzrgb(path + "/map_xyzrgb_height.pcd", *merged_map, PCDColorMode::HEIGHT, &stats)) {
+      logger->info("exported map_xyzrgb_height.pcd written={} input={}", stats.written_points, stats.input_points);
+    } else {
+      logger->warn("failed to export map_xyzrgb_height.pcd");
+    }
+  } else {
+    logger->warn("skip PCD export: merged map is empty");
+  }
 }
 
 
