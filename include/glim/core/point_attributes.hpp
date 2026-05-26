@@ -101,6 +101,45 @@ struct PointAttributes {
            check(dynamic_label, "dynamic_label");
   }
 
+
+  template <typename VectorT>
+  static std::optional<VectorT> sample_optional(
+      const std::optional<VectorT>& src,
+      const std::vector<std::size_t>& indices) {
+    if (!src) {
+      return std::nullopt;
+    }
+
+    VectorT out;
+    out.reserve(indices.size());
+
+    for (const auto idx : indices) {
+      if (idx >= src->size()) {
+        throw std::out_of_range("PointAttributes::sample_optional index out of range");
+      }
+      out.push_back((*src)[idx]);
+    }
+
+    return out;
+  }
+
+  PointAttributes sample(const std::vector<std::size_t>& indices) const {
+    PointAttributes out;
+
+    out.intensity = sample_optional(intensity, indices);
+    out.timestamp = sample_optional(timestamp, indices);
+    out.line = sample_optional(line, indices);
+    out.tag = sample_optional(tag, indices);
+    out.scanner_id = sample_optional(scanner_id, indices);
+    out.rgb = sample_optional(rgb, indices);
+    out.normals = sample_optional(normals, indices);
+    out.covariances = sample_optional(covariances, indices);
+    out.static_score = sample_optional(static_score, indices);
+    out.dynamic_label = sample_optional(dynamic_label, indices);
+
+    return out;
+  }
+
   void throw_if_invalid(std::size_t num_points) const {
     std::string error;
     if (!validate(num_points, &error)) {

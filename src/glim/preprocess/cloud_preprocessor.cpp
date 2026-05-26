@@ -3,6 +3,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <spdlog/spdlog.h>
 #include <gtsam_points/config.hpp>
 #include <gtsam_points/ann/kdtree.hpp>
@@ -18,6 +19,40 @@
 #endif
 
 namespace glim {
+
+namespace {
+
+std::vector<std::size_t> find_nearest_raw_indices(
+    const std::vector<Eigen::Vector4d>& raw_points,
+    const std::vector<Eigen::Vector4d>& processed_points) {
+  std::vector<std::size_t> indices(processed_points.size(), 0);
+
+  if (raw_points.empty() || processed_points.empty()) {
+    return indices;
+  }
+
+  gtsam_points::KdTree tree(raw_points.data(), static_cast<int>(raw_points.size()));
+
+  for (std::size_t i = 0; i < processed_points.size(); i++) {
+    std::size_t nearest_index = 0;
+    double nearest_squared_distance = std::numeric_limits<double>::max();
+
+    const auto found = tree.knn_search(
+      processed_points[i].data(),
+      1,
+      &nearest_index,
+      &nearest_squared_distance);
+
+    if (found > 0) {
+      indices[i] = nearest_index;
+    }
+  }
+
+  return indices;
+}
+
+}  // namespace
+
 
 CloudPreprocessorParams::CloudPreprocessorParams() {
   Config config(GlobalConfig::get_config_path("config_preprocess"));
@@ -233,7 +268,25 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess_impl(const RawPoints::Const
     preprocessed->intensities.assign(frame->intensities, frame->intensities + frame->size());
   }
 
-  // PR290-style attributes that are guaranteed to stay aligned after preprocessing.
+  // PR290-style attributes.
+  //
+  // gtsam_points preserves standard times/intensities internally, but not arbitrary
+  // fields such as line/tag/scanner_id/rgb.  For those attributes, recover the
+  // nearest source point from the raw cloud and sample its attributes.
+  if (!raw_points->attrs.empty()) {
+    std::string attrs_error;
+    if (raw_points->attrs.validate(raw_points->points.size(), &attrs_error)) {
+      const auto nearest_raw_indices =
+        find_nearest_raw_indices(raw_points->points, preprocessed->points);
+
+      preprocessed->attrs = raw_points->attrs.sample(nearest_raw_indices);
+    } else {
+      spdlog::warn("skip raw PointAttributes propagation: {}", attrs_error);
+    }
+  }
+
+  // Override timestamp/intensity with the final preprocessed values, because
+  // these are exactly aligned with frame after gtsam_points sampling/filtering.
   preprocessed->attrs.timestamp = preprocessed->times;
 
   if (!preprocessed->intensities.empty()) {
