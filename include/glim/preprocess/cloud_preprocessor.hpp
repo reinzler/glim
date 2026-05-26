@@ -6,6 +6,7 @@
 #include <Eigen/Geometry>
 
 #include <glim/preprocess/preprocessed_frame.hpp>
+#include <glim/preprocess/scan_guard.hpp>
 
 namespace glim {
 
@@ -36,6 +37,8 @@ public:
   int k_correspondences;              ///< Number of neighboring points
 
   int num_threads;                    ///< Number of threads
+
+  ScanGuardConfig scan_guard;        ///< Safety guard for empty / filtered-empty scans
 };
 
 /**

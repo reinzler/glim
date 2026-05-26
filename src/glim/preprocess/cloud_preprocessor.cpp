@@ -58,6 +58,15 @@ CloudPreprocessorParams::CloudPreprocessorParams() {
   k_correspondences = config.param<int>("preprocess", "k_correspondences", 8);
 
   num_threads = config.param<int>("preprocess", "num_threads", 2);
+
+  scan_guard.enable = config.param<bool>("scan_guard", "enable", true);
+  scan_guard.min_raw_points = config.param<int>("scan_guard", "min_raw_points", 100);
+  scan_guard.min_filtered_points = config.param<int>("scan_guard", "min_filtered_points", 80);
+  scan_guard.min_effective_points = config.param<int>("scan_guard", "min_effective_points", 50);
+  scan_guard.max_empty_scan_burst = config.param<int>("scan_guard", "max_empty_scan_burst", 10);
+  scan_guard.drop_empty_frame = config.param<bool>("scan_guard", "drop_empty_frame", true);
+  scan_guard.allow_imu_only_prediction = config.param<bool>("scan_guard", "allow_imu_only_prediction", true);
+  scan_guard.publish_diagnostics = config.param<bool>("scan_guard", "publish_diagnostics", true);
 }
 
 CloudPreprocessorParams::~CloudPreprocessorParams() {}
@@ -68,29 +77,56 @@ CloudPreprocessor::CloudPreprocessor(const CloudPreprocessorParams& params) : pa
     tbb_task_arena.reset(new tbb::task_arena(params.num_threads));
   }
 #endif
+
+  spdlog::info(
+    "[scan_guard] enable={} min_raw={} min_filtered={} min_effective={} max_burst={} drop_empty_frame={}",
+    params.scan_guard.enable,
+    params.scan_guard.min_raw_points,
+    params.scan_guard.min_filtered_points,
+    params.scan_guard.min_effective_points,
+    params.scan_guard.max_empty_scan_burst,
+    params.scan_guard.drop_empty_frame);
 }
 
 CloudPreprocessor::~CloudPreprocessor() {}
 
 PreprocessedFrame::Ptr CloudPreprocessor::preprocess(const RawPoints::ConstPtr& raw_points) {
-  PreprocessCallbacks::on_raw_points_received(raw_points);
-  if (gtsam_points::is_omp_default() || params.num_threads == 1 || !tbb_task_arena) {
-    return preprocess_impl(raw_points);
+  if (!raw_points) {
+    spdlog::warn("[scan_guard] raw_points is nullptr, skip preprocessing");
+    return nullptr;
   }
 
-  PreprocessedFrame::Ptr preprocessed;
-#ifdef GTSAM_POINTS_USE_TBB
-  auto arena = static_cast<tbb::task_arena*>(tbb_task_arena.get());
-  arena->execute([&] { preprocessed = preprocess_impl(raw_points); });
-#else
-  std::cerr << "error : TBB is not enabled" << std::endl;
-  abort();
-#endif
+  auto preprocessed = preprocess_impl(raw_points);
+
+  if (!preprocessed) {
+    spdlog::warn(
+      "[scan_guard] preprocessor returned nullptr for stamp={} raw_points={}",
+      raw_points->stamp,
+      raw_points->size());
+  }
+
   return preprocessed;
 }
 
 PreprocessedFrame::Ptr CloudPreprocessor::preprocess_impl(const RawPoints::ConstPtr& raw_points) {
-  spdlog::trace("preprocessing input: {} points", raw_points->size());
+  static thread_local ScanGuard scan_guard_local;
+  scan_guard_local.set_config(params.scan_guard);
+
+  const double raw_stamp = raw_points ? raw_points->stamp : 0.0;
+  const std::size_t raw_size = raw_points ? raw_points->size() : 0;
+
+  const auto raw_guard_status = scan_guard_local.evaluate_raw(raw_stamp, raw_size);
+  if (!raw_guard_status.accepted && params.scan_guard.drop_empty_frame) {
+    spdlog::warn(
+      "[scan_guard] skip raw scan stamp={} raw={} reason={} burst={}",
+      raw_guard_status.stamp,
+      raw_guard_status.raw_points,
+      raw_guard_status.reason_text,
+      raw_guard_status.consecutive_skipped_frames);
+    return nullptr;
+  }
+
+  spdlog::trace("preprocessing input: {} points", raw_size);
 
   gtsam_points::PointCloudCPU::Ptr frame = std::make_shared<gtsam_points::PointCloudCPU>();
   frame->add_times(raw_points->times);
@@ -167,6 +203,24 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess_impl(const RawPoints::Const
   }
 
   PreprocessCallbacks::on_filtering_finished(frame);
+
+  const auto filtered_guard_status = scan_guard_local.evaluate_filtered(
+    raw_points->stamp,
+    raw_points->size(),
+    frame ? frame->size() : 0,
+    frame ? frame->size() : 0);
+
+  if (!filtered_guard_status.accepted && params.scan_guard.drop_empty_frame) {
+    spdlog::warn(
+      "[scan_guard] skip filtered scan stamp={} raw={} filtered={} effective={} reason={} burst={}",
+      filtered_guard_status.stamp,
+      filtered_guard_status.raw_points,
+      filtered_guard_status.filtered_points,
+      filtered_guard_status.effective_points,
+      filtered_guard_status.reason_text,
+      filtered_guard_status.consecutive_skipped_frames);
+    return nullptr;
+  }
 
   // Create a preprocessed frame
   PreprocessedFrame::Ptr preprocessed(new PreprocessedFrame);
