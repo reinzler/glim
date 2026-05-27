@@ -31,6 +31,7 @@
 
 #include <glim/util/config.hpp>
 #include <glim/util/pcd_exporter.hpp>
+#include <glim/util/mapcleaner_exporter.hpp>
 #include <glim/util/serialization.hpp>
 #include <glim/common/imu_integration.hpp>
 #include <glim/mapping/callbacks.hpp>
@@ -669,6 +670,23 @@ void GlobalMapping::save(const std::string& path) {
     }
   } else {
     logger->warn("skip PCD export: merged map is empty");
+  }
+
+  logger->info("exporting MapCleaner-compatible dataset");
+  MapCleanerExportStats mapcleaner_stats;
+
+  if (export_mapcleaner_dataset(path + "/mapcleaner", submaps, &mapcleaner_stats)) {
+    logger->info(
+      "MapCleaner export done: submaps={} submaps_with_keyframes={} frames_seen={} keyframes_seen={} scans={} poses={} skipped={}",
+      mapcleaner_stats.submaps,
+      mapcleaner_stats.submaps_with_keyframes,
+      mapcleaner_stats.frames_seen,
+      mapcleaner_stats.keyframes_seen,
+      mapcleaner_stats.scans_written,
+      mapcleaner_stats.poses_written,
+      mapcleaner_stats.skipped_empty_frames);
+  } else {
+    logger->warn("MapCleaner export failed");
   }
 }
 

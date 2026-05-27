@@ -69,6 +69,7 @@ add_library(glim SHARED
   src/glim/util/serialization.cpp
   src/glim/util/debug.cpp
   src/glim/util/pcd_exporter.cpp
+  src/glim/util/mapcleaner_exporter.cpp
   # preprocess
   src/glim/preprocess/callbacks.cpp
   src/glim/preprocess/cloud_preprocessor.cpp

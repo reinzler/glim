@@ -1,4 +1,7 @@
+#include <algorithm>
+#include <limits>
 #include <glim/mapping/sub_mapping.hpp>
+#include <glim/util/mapcleaner_types.hpp>
 
 #include <filesystem>
 #include <spdlog/spdlog.h>
@@ -28,9 +31,241 @@
 
 #ifdef GTSAM_USE_TBB
 #include <tbb/task_arena.h>
+#include <cmath>
+#include <memory>
+#include <cstdint>
+#include <unordered_map>
 #endif
 
 namespace glim {
+
+namespace {
+
+bool has_nonzero_intensity(const gtsam_points::PointCloud& cloud) {
+  if (!cloud.has_intensities()) {
+    return false;
+  }
+
+  for (int i = 0; i < cloud.size(); i++) {
+    if (std::isfinite(cloud.intensities[i]) && std::abs(cloud.intensities[i]) > 1e-12) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+struct VoxelKey {
+  std::int64_t x = 0;
+  std::int64_t y = 0;
+  std::int64_t z = 0;
+
+  bool operator==(const VoxelKey& other) const {
+    return x == other.x && y == other.y && z == other.z;
+  }
+};
+
+struct VoxelKeyHash {
+  std::size_t operator()(const VoxelKey& k) const {
+    std::size_t h = 1469598103934665603ull;
+    const auto mix = [&](std::int64_t v) {
+      h ^= std::hash<std::int64_t>{}(v);
+      h *= 1099511628211ull;
+    };
+
+    mix(k.x);
+    mix(k.y);
+    mix(k.z);
+    return h;
+  }
+};
+
+VoxelKey make_voxel_key(const Eigen::Vector4d& p, double inv_resolution) {
+  return {
+    static_cast<std::int64_t>(std::floor(p.x() * inv_resolution)),
+    static_cast<std::int64_t>(std::floor(p.y() * inv_resolution)),
+    static_cast<std::int64_t>(std::floor(p.z() * inv_resolution))
+  };
+}
+
+bool finite_xyz(const Eigen::Vector4d& p) {
+  return std::isfinite(p.x()) && std::isfinite(p.y()) && std::isfinite(p.z());
+}
+
+double squared_xyz_distance(const Eigen::Vector4d& a, const Eigen::Vector4d& b) {
+  return (a.template head<3>() - b.template head<3>()).squaredNorm();
+}
+
+class IntensitySpatialLookup {
+public:
+  IntensitySpatialLookup(
+      const gtsam_points::PointCloud& source,
+      double voxel_resolution)
+  : source_(source) {
+    voxel_resolution_ = std::max(0.01, voxel_resolution);
+    inv_resolution_ = 1.0 / voxel_resolution_;
+
+    buckets_.reserve(static_cast<std::size_t>(source_.size()) * 2);
+
+    for (int i = 0; i < source_.size(); i++) {
+      if (!finite_xyz(source_.points[i])) {
+        continue;
+      }
+
+      buckets_[make_voxel_key(source_.points[i], inv_resolution_)].push_back(i);
+    }
+  }
+
+  bool lookup(const Eigen::Vector4d& query, double& intensity) const {
+    if (!finite_xyz(query) || source_.size() == 0 || !source_.has_intensities()) {
+      return false;
+    }
+
+    const auto base = make_voxel_key(query, inv_resolution_);
+
+    int best_index = -1;
+    double best_squared_distance = std::numeric_limits<double>::max();
+
+    // Search nearby voxels. Radius 4 is enough for typical downsampled submap
+    // points while staying much cheaper than full brute-force.
+    constexpr int max_radius = 4;
+
+    for (int radius = 0; radius <= max_radius; radius++) {
+      bool touched_any_bucket = false;
+
+      for (int dx = -radius; dx <= radius; dx++) {
+        for (int dy = -radius; dy <= radius; dy++) {
+          for (int dz = -radius; dz <= radius; dz++) {
+            if (std::max({std::abs(dx), std::abs(dy), std::abs(dz)}) != radius) {
+              continue;
+            }
+
+            const VoxelKey key{base.x + dx, base.y + dy, base.z + dz};
+            const auto found = buckets_.find(key);
+            if (found == buckets_.end()) {
+              continue;
+            }
+
+            touched_any_bucket = true;
+
+            for (const int idx : found->second) {
+              const double d2 = squared_xyz_distance(query, source_.points[idx]);
+              if (d2 < best_squared_distance) {
+                best_squared_distance = d2;
+                best_index = idx;
+              }
+            }
+          }
+        }
+      }
+
+      if (touched_any_bucket && best_index >= 0) {
+        break;
+      }
+    }
+
+    // Fallback for small clouds only. Avoid accidental O(N*M) on large maps.
+    if (best_index < 0 && source_.size() <= 50000) {
+      for (int i = 0; i < source_.size(); i++) {
+        if (!finite_xyz(source_.points[i])) {
+          continue;
+        }
+
+        const double d2 = squared_xyz_distance(query, source_.points[i]);
+        if (d2 < best_squared_distance) {
+          best_squared_distance = d2;
+          best_index = i;
+        }
+      }
+    }
+
+    if (best_index < 0) {
+      return false;
+    }
+
+    intensity = source_.intensities[best_index];
+    return true;
+  }
+
+private:
+  const gtsam_points::PointCloud& source_;
+  double voxel_resolution_ = 0.1;
+  double inv_resolution_ = 10.0;
+  std::unordered_map<VoxelKey, std::vector<int>, VoxelKeyHash> buckets_;
+};
+
+
+void restore_intensities_by_nearest(
+    const gtsam_points::PointCloud::ConstPtr& source,
+    const gtsam_points::PointCloud::Ptr& target,
+    double /*voxel_resolution*/ = 0.1) {
+  if (!source || !target || source->size() == 0 || target->size() == 0 || !source->has_intensities()) {
+    return;
+  }
+
+  auto target_cpu = std::dynamic_pointer_cast<gtsam_points::PointCloudCPU>(target);
+  if (!target_cpu) {
+    return;
+  }
+
+  std::vector<double> restored(target->size(), 0.0);
+
+  for (int i = 0; i < target->size(); i++) {
+    int best = -1;
+    double best_d2 = std::numeric_limits<double>::max();
+
+    for (int j = 0; j < source->size(); j++) {
+      const double d2 =
+        (target->points[i].template head<3>() - source->points[j].template head<3>()).squaredNorm();
+
+      if (d2 < best_d2) {
+        best_d2 = d2;
+        best = j;
+      }
+    }
+
+    if (best >= 0) {
+      restored[i] = source->intensities[best];
+    }
+  }
+
+  target_cpu->add_intensities(restored);
+}
+
+gtsam_points::PointCloudCPU::Ptr make_intensity_source_from_keyframes(
+    const std::vector<gtsam_points::PointCloud::ConstPtr>& keyframes,
+    const std::vector<Eigen::Isometry3d>& poses) {
+  std::vector<Eigen::Vector4d> points;
+  std::vector<double> intensities;
+
+  for (std::size_t k = 0; k < keyframes.size(); k++) {
+    const auto& frame = keyframes[k];
+    if (!frame || !frame->has_intensities()) {
+      continue;
+    }
+
+    points.reserve(points.size() + frame->size());
+    intensities.reserve(intensities.size() + frame->size());
+
+    for (int i = 0; i < frame->size(); i++) {
+      points.push_back(poses[k] * frame->points[i]);
+      intensities.push_back(frame->intensities[i]);
+    }
+  }
+
+  if (points.empty()) {
+    return nullptr;
+  }
+
+  auto cloud = std::make_shared<gtsam_points::PointCloudCPU>();
+  cloud->add_points(points);
+  cloud->add_intensities(intensities);
+  return cloud;
+}
+
+}  // namespace
+
+
 
 using gtsam::symbol_shorthand::B;
 using gtsam::symbol_shorthand::V;
@@ -378,6 +613,17 @@ void SubMapping::insert_keyframe(const int current, const EstimationFrame::Const
   // Random sampling for registration error factors
   gtsam_points::PointCloud::Ptr subsampled_frame = gtsam_points::random_sampling(deskewed_frame, params.keyframe_randomsampling_rate, mt);
 
+  // Some gtsam_points sampling/merge paths may drop or zero intensities.
+  // Keep legacy intensity alive for colored export and MapCleaner datasets.
+  if (deskewed_frame->has_intensities()) {
+    restore_intensities_by_nearest(deskewed_frame, subsampled_frame, std::max(0.05, params.submap_downsample_resolution));
+    logger->debug(
+      "keyframe intensity preserved={} source_nonzero={} target_nonzero={}",
+      subsampled_frame->has_intensities(),
+      has_nonzero_intensity(*deskewed_frame),
+      has_nonzero_intensity(*subsampled_frame));
+  }
+
   EstimationFrame::Ptr keyframe(new EstimationFrame);
   *keyframe = *odom_frame;
 
@@ -479,6 +725,30 @@ SubMap::Ptr SubMapping::create_submap(bool force_create) const {
     poses_to_merge[i] = submap->T_world_origin.inverse() * Eigen::Isometry3d(values->at<gtsam::Pose3>(X(keyframe_indices[i])).matrix());
   }
 
+  // Preserve individual keyframe clouds for MapCleaner-compatible dataset export.
+  // submap->frames / odom_frames may have been clone_wo_points()'d for memory,
+  // but keyframes still contain the scan clouds used by merge_frames_auto().
+  {
+    auto mapcleaner_keyframes = std::make_shared<glim::MapCleanerKeyframes>();
+    mapcleaner_keyframes->reserve(keyframes.size());
+
+    for (int i = 0; i < keyframes.size(); i++) {
+      if (!keyframes[i] || !keyframes[i]->frame || keyframes[i]->frame->size() == 0) {
+        continue;
+      }
+
+      glim::MapCleanerKeyframe record;
+      record.stamp = keyframes[i]->stamp;
+      record.T_origin_lidar = poses_to_merge[i];
+      record.cloud = keyframes[i]->frame;
+
+      mapcleaner_keyframes->push_back(record);
+    }
+
+    submap->custom_data[glim::MAPCLEANER_KEYFRAMES_KEY] = mapcleaner_keyframes;
+    logger->debug("MapCleaner keyframes preserved: {}", mapcleaner_keyframes->size());
+  }
+
   // TODO: improve merging process
 #ifdef GTSAM_POINTS_USE_CUDA
   if (params.enable_gpu) {
@@ -489,12 +759,34 @@ SubMap::Ptr SubMapping::create_submap(bool force_create) const {
   if (submap->frame == nullptr) {
     submap->frame = gtsam_points::merge_frames_auto(poses_to_merge, keyframes_to_merge, params.submap_downsample_resolution);
   }
+
+  {
+    const auto intensity_source =
+      make_intensity_source_from_keyframes(keyframes_to_merge, poses_to_merge);
+
+    if (intensity_source) {
+      restore_intensities_by_nearest(intensity_source, submap->frame, std::max(0.05, params.submap_downsample_resolution));
+      logger->debug(
+        "merged submap intensity preserved={} source_nonzero={} target_nonzero={}",
+        submap->frame->has_intensities(),
+        has_nonzero_intensity(*intensity_source),
+        has_nonzero_intensity(*submap->frame));
+    }
+  }
+
   logger->debug("|merged_submap|={}", submap->frame->size());
 
   if (params.submap_target_num_points > 0 && submap->frame->size() > params.submap_target_num_points) {
+    const auto before_subsampling = submap->frame;
+
     std::mt19937 mt(submap_count * 643145 + submap->frame->size() * 4312);  // Just a random-like seed
     submap->frame = gtsam_points::random_sampling(submap->frame, static_cast<double>(params.submap_target_num_points) / submap->frame->size(), mt);
-    logger->debug("|subsampled_submap|={}", submap->frame->size());
+
+    if (before_subsampling->has_intensities()) {
+      restore_intensities_by_nearest(before_subsampling, submap->frame, std::max(0.05, params.submap_downsample_resolution));
+    }
+
+    logger->debug("|subsampled_submap|={} intensity_nonzero={}", submap->frame->size(), has_nonzero_intensity(*submap->frame));
   }
 
   return submap;
