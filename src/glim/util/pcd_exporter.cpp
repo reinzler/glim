@@ -111,6 +111,49 @@ std::pair<double, double> minmax_intensity(const gtsam_points::PointCloud& cloud
   return {mn, mx};
 }
 
+
+std::pair<double, double> robust_minmax_intensity(const gtsam_points::PointCloud& cloud) {
+  if (!cloud.has_intensities()) {
+    return {0.0, 1.0};
+  }
+
+  std::vector<double> values;
+  values.reserve(cloud.size());
+
+  for (int i = 0; i < cloud.size(); i++) {
+    const double v = cloud.intensities[i];
+    if (std::isfinite(v)) {
+      values.push_back(v);
+    }
+  }
+
+  if (values.empty()) {
+    return {0.0, 1.0};
+  }
+
+  std::sort(values.begin(), values.end());
+
+  const auto q = [&](double p) {
+    const std::size_t idx = static_cast<std::size_t>(
+      std::max(0.0, std::min(1.0, p)) * static_cast<double>(values.size() - 1));
+    return values[idx];
+  };
+
+  double mn = q(0.02);
+  double mx = q(0.98);
+
+  if (!std::isfinite(mn) || !std::isfinite(mx) || std::abs(mx - mn) < 1e-9) {
+    mn = values.front();
+    mx = values.back();
+  }
+
+  if (std::abs(mx - mn) < 1e-9) {
+    mx = mn + 1.0;
+  }
+
+  return {mn, mx};
+}
+
 std::vector<int> finite_indices(const gtsam_points::PointCloud& cloud) {
   std::vector<int> indices;
   indices.reserve(cloud.size());
@@ -232,9 +275,16 @@ bool save_pcd_xyzrgb(
   }
 
   const auto [z_min, z_max] = minmax_z(cloud);
-  const auto [i_min, i_max] = minmax_intensity(cloud);
+  const auto [i_min, i_max] = robust_minmax_intensity(cloud);
 
-  std::ofstream ofs(path);
+  //
+  // Important:
+  // PCL/PCD RGB is traditionally stored as a packed RGB value reinterpreted
+  // as float.  If we write that float in ASCII with fixed precision, many
+  // valid RGB bit patterns are printed as "0.000000", so viewers show a
+  // monochrome cloud.  Use binary PCD to preserve the exact RGB bytes.
+  //
+  std::ofstream ofs(path, std::ios::binary);
   if (!ofs) {
     return false;
   }
@@ -249,10 +299,7 @@ bool save_pcd_xyzrgb(
   ofs << "HEIGHT 1\n";
   ofs << "VIEWPOINT 0 0 0 1 0 0 0\n";
   ofs << "POINTS " << indices.size() << "\n";
-  ofs << "DATA ascii\n";
-
-  ofs.setf(std::ios::fixed);
-  ofs.precision(6);
+  ofs << "DATA binary\n";
 
   for (const int idx : indices) {
     const auto& p = cloud.points[idx];
@@ -265,18 +312,28 @@ bool save_pcd_xyzrgb(
       const double t = (p.z() - z_min) / (z_max - z_min);
       std::tie(r, g, b) = ramp_color(t);
     } else if (color_mode == PCDColorMode::INTENSITY) {
-      const double t = (cloud.intensities[idx] - i_min) / (i_max - i_min);
-      std::tie(r, g, b) = grayscale(t);
+      double t = (cloud.intensities[idx] - i_min) / (i_max - i_min);
+      t = std::max(0.0, std::min(1.0, t));
+
+      // Gamma < 1 brightens low-reflectivity Livox/Velodyne maps.
+      t = std::sqrt(t);
+
+      std::tie(r, g, b) = ramp_color(t);
     }
 
-    ofs << static_cast<float>(p.x()) << ' '
-        << static_cast<float>(p.y()) << ' '
-        << static_cast<float>(p.z()) << ' '
-        << pack_rgb_float(r, g, b) << '\n';
+    const std::array<float, 4> row = {
+      static_cast<float>(p.x()),
+      static_cast<float>(p.y()),
+      static_cast<float>(p.z()),
+      pack_rgb_float(r, g, b)
+    };
+
+    ofs.write(reinterpret_cast<const char*>(row.data()), sizeof(float) * row.size());
   }
 
   fill_stats(cloud, indices.size(), stats);
-  return true;
+  return static_cast<bool>(ofs);
 }
+
 
 }  // namespace glim

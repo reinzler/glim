@@ -270,34 +270,70 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess_impl(const RawPoints::Const
 
   // PR290-style attributes.
   //
-  // gtsam_points preserves standard times/intensities internally, but not arbitrary
-  // fields such as line/tag/scanner_id/rgb.  For those attributes, recover the
-  // nearest source point from the raw cloud and sample its attributes.
+  // gtsam_points preserves standard times internally, but intensity can be lost
+  // or zeroed by some sampling/filtering paths.  Arbitrary fields such as
+  // line/tag/scanner_id/rgb are also not preserved by gtsam_points.
+  //
+  // Recover attributes by mapping every final preprocessed point to the nearest
+  // source raw point.  This keeps legacy PreprocessedFrame::intensities valid for
+  // downstream SubMap / GlobalMapping export.
+  std::vector<std::size_t> nearest_raw_indices;
+
   if (!raw_points->attrs.empty()) {
     std::string attrs_error;
     if (raw_points->attrs.validate(raw_points->points.size(), &attrs_error)) {
-      const auto nearest_raw_indices =
+      nearest_raw_indices =
         find_nearest_raw_indices(raw_points->points, preprocessed->points);
 
       preprocessed->attrs = raw_points->attrs.sample(nearest_raw_indices);
+
+      if (raw_points->attrs.intensity) {
+        preprocessed->intensities.resize(preprocessed->size());
+
+        for (std::size_t i = 0; i < nearest_raw_indices.size(); i++) {
+          preprocessed->intensities[i] =
+            static_cast<double>((*raw_points->attrs.intensity)[nearest_raw_indices[i]]);
+        }
+      } else if (!raw_points->intensities.empty()) {
+        preprocessed->intensities.resize(preprocessed->size());
+
+        for (std::size_t i = 0; i < nearest_raw_indices.size(); i++) {
+          preprocessed->intensities[i] =
+            raw_points->intensities[nearest_raw_indices[i]];
+        }
+      }
     } else {
       spdlog::warn("skip raw PointAttributes propagation: {}", attrs_error);
     }
   }
 
-  // Override timestamp/intensity with the final preprocessed values, because
-  // these are exactly aligned with frame after gtsam_points sampling/filtering.
+  // Timestamp from final frame is authoritative after TimeKeeper/preprocessing.
   preprocessed->attrs.timestamp = preprocessed->times;
 
+  // Intensity must mirror final legacy PreprocessedFrame::intensities because
+  // SubMap / GlobalMapping still consume this legacy field.
   if (!preprocessed->intensities.empty()) {
     auto& dst = preprocessed->attrs.intensity.emplace();
     dst.resize(preprocessed->intensities.size());
+
     for (std::size_t i = 0; i < preprocessed->intensities.size(); i++) {
       dst[i] = static_cast<float>(preprocessed->intensities[i]);
     }
   }
 
   preprocessed->attrs.throw_if_invalid(preprocessed->size());
+
+  if (!preprocessed->intensities.empty()) {
+    const auto [min_it, max_it] = std::minmax_element(
+      preprocessed->intensities.begin(),
+      preprocessed->intensities.end());
+
+    spdlog::debug(
+      "[PointAttributes] preprocessed intensity range: min={} max={} count={}",
+      *min_it,
+      *max_it,
+      preprocessed->intensities.size());
+  }
 
   preprocessed->k_neighbors = params.k_correspondences;
   preprocessed->neighbors = find_neighbors(frame->points, frame->size(), params.k_correspondences);
