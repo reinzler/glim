@@ -9,6 +9,7 @@ CallbackSlot<void(const EstimationFrame::ConstPtr& estimated_frame)> IMUStateIni
 
 #ifdef GLIM_USE_OPENCV
 CallbackSlot<void(const double, const cv::Mat&)> OdometryEstimationCallbacks::on_insert_image;
+CallbackSlot<void(const CameraImageFrame::ConstPtr&)> OdometryEstimationCallbacks::on_insert_image_frame;
 #endif
 CallbackSlot<void(const double, const Eigen::Vector3d&, const Eigen::Vector3d&)> OdometryEstimationCallbacks::on_insert_imu;
 CallbackSlot<void(const PreprocessedFrame::Ptr& frame)> OdometryEstimationCallbacks::on_insert_frame;

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <map>
+#include <memory>
+#include <string>
 #include <glim/util/callback_slot.hpp>
 #include <glim/odometry/estimation_frame.hpp>
 
@@ -21,6 +23,43 @@ class IncrementalFixedLagSmootherExtWithFallback;
 }  // namespace gtsam_points
 
 namespace glim {
+
+#ifdef GLIM_USE_OPENCV
+/**
+ * @brief Camera image packet for multi-camera visual frontends.
+ *
+ * This keeps the old single-camera callback intact while allowing
+ * extensions to receive images from N cameras with stable camera IDs.
+ */
+struct CameraImageFrame {
+public:
+  using Ptr = std::shared_ptr<CameraImageFrame>;
+  using ConstPtr = std::shared_ptr<const CameraImageFrame>;
+
+  CameraImageFrame() = default;
+
+  CameraImageFrame(
+    const double stamp,
+    const int camera_id,
+    const std::string& camera_name,
+    const std::string& frame_id,
+    const std::shared_ptr<const cv::Mat>& image)
+  : stamp(stamp),
+    camera_id(camera_id),
+    camera_name(camera_name),
+    frame_id(frame_id),
+    image(image) {}
+
+public:
+  double stamp = 0.0;
+  int camera_id = 0;
+  std::string camera_name;
+  std::string frame_id;
+
+  std::shared_ptr<const cv::Mat> image;
+};
+#endif
+
 
 /**
  * @brief IMU state initialization-related callbacks
@@ -53,6 +92,12 @@ struct OdometryEstimationCallbacks {
    * @param image  Image
    */
   static CallbackSlot<void(const double stamp, const cv::Mat& image)> on_insert_image;
+
+  /**
+   * @brief Multi-camera image input callback
+   * @param image  Camera image packet with camera_id/name/frame_id
+   */
+  static CallbackSlot<void(const CameraImageFrame::ConstPtr& image)> on_insert_image_frame;
 #endif
 
   /**
