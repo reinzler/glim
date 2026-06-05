@@ -672,21 +672,30 @@ void GlobalMapping::save(const std::string& path) {
     logger->warn("skip PCD export: merged map is empty");
   }
 
-  logger->info("exporting MapCleaner-compatible dataset");
-  MapCleanerExportStats mapcleaner_stats;
+  // MAPCLEANER_EXPORT_CONFIG_SWITCH_FINAL
+  const bool export_mapcleaner =
+    Config(GlobalConfig::get_config_path("config_global_mapping"))
+      .param<bool>("global_mapping", "export_mapcleaner", false);
 
-  if (export_mapcleaner_dataset(path + "/mapcleaner", submaps, &mapcleaner_stats)) {
-    logger->info(
-      "MapCleaner export done: submaps={} submaps_with_keyframes={} frames_seen={} keyframes_seen={} scans={} poses={} skipped={}",
-      mapcleaner_stats.submaps,
-      mapcleaner_stats.submaps_with_keyframes,
-      mapcleaner_stats.frames_seen,
-      mapcleaner_stats.keyframes_seen,
-      mapcleaner_stats.scans_written,
-      mapcleaner_stats.poses_written,
-      mapcleaner_stats.skipped_empty_frames);
+  if (export_mapcleaner) {
+    logger->info("exporting MapCleaner-compatible dataset");
+    MapCleanerExportStats mapcleaner_stats;
+
+    if (export_mapcleaner_dataset(path + "/mapcleaner", submaps, &mapcleaner_stats)) {
+      logger->info(
+        "MapCleaner export done: submaps={} submaps_with_keyframes={} frames_seen={} keyframes_seen={} scans={} poses={} skipped={}",
+        mapcleaner_stats.submaps,
+        mapcleaner_stats.submaps_with_keyframes,
+        mapcleaner_stats.frames_seen,
+        mapcleaner_stats.keyframes_seen,
+        mapcleaner_stats.scans_written,
+        mapcleaner_stats.poses_written,
+        mapcleaner_stats.skipped_empty_frames);
+    } else {
+      logger->warn("MapCleaner export failed");
+    }
   } else {
-    logger->warn("MapCleaner export failed");
+    logger->info("MapCleaner export disabled (global_mapping/export_mapcleaner=false)");
   }
 }
 

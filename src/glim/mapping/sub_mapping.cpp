@@ -725,28 +725,39 @@ SubMap::Ptr SubMapping::create_submap(bool force_create) const {
     poses_to_merge[i] = submap->T_world_origin.inverse() * Eigen::Isometry3d(values->at<gtsam::Pose3>(X(keyframe_indices[i])).matrix());
   }
 
-  // Preserve individual keyframe clouds for MapCleaner-compatible dataset export.
-  // submap->frames / odom_frames may have been clone_wo_points()'d for memory,
-  // but keyframes still contain the scan clouds used by merge_frames_auto().
-  {
-    auto mapcleaner_keyframes = std::make_shared<glim::MapCleanerKeyframes>();
-    mapcleaner_keyframes->reserve(keyframes.size());
+  // MAPCLEANER_CONFIG_SWITCH_FINAL
+  const bool preserve_mapcleaner_keyframes =
+    Config(GlobalConfig::get_config_path("config_sub_mapping"))
+      .param<bool>("sub_mapping", "preserve_mapcleaner_keyframes", false);
 
-    for (int i = 0; i < keyframes.size(); i++) {
-      if (!keyframes[i] || !keyframes[i]->frame || keyframes[i]->frame->size() == 0) {
-        continue;
+  if (preserve_mapcleaner_keyframes) {
+    // Preserve individual keyframe clouds for MapCleaner-compatible dataset export.
+    // submap->frames / odom_frames may have been clone_wo_points()'d for memory,
+    // but keyframes still contain the scan clouds used by merge_frames_auto().
+    {
+      auto mapcleaner_keyframes = std::make_shared<glim::MapCleanerKeyframes>();
+      mapcleaner_keyframes->reserve(keyframes.size());
+
+      for (int i = 0; i < keyframes.size(); i++) {
+        if (!keyframes[i] || !keyframes[i]->frame || keyframes[i]->frame->size() == 0) {
+          continue;
+        }
+
+        glim::MapCleanerKeyframe record;
+        record.stamp = keyframes[i]->stamp;
+        record.T_origin_lidar = poses_to_merge[i];
+        record.cloud = keyframes[i]->frame;
+
+        mapcleaner_keyframes->push_back(record);
       }
 
-      glim::MapCleanerKeyframe record;
-      record.stamp = keyframes[i]->stamp;
-      record.T_origin_lidar = poses_to_merge[i];
-      record.cloud = keyframes[i]->frame;
-
-      mapcleaner_keyframes->push_back(record);
+      submap->custom_data[glim::MAPCLEANER_KEYFRAMES_KEY] = mapcleaner_keyframes;
+      logger->debug("MapCleaner keyframes preserved: {}", mapcleaner_keyframes->size());
     }
-
-    submap->custom_data[glim::MAPCLEANER_KEYFRAMES_KEY] = mapcleaner_keyframes;
-    logger->debug("MapCleaner keyframes preserved: {}", mapcleaner_keyframes->size());
+  } else {
+    logger->debug(
+      "MapCleaner keyframe preservation disabled "
+      "(sub_mapping/preserve_mapcleaner_keyframes=false)");
   }
 
   // TODO: improve merging process
