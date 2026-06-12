@@ -10,6 +10,7 @@
 #include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/slam/PoseRotationPrior.h>
 #include <gtsam/slam/PoseTranslationPrior.h>
+#include <gtsam/slam/PriorFactor.h>
 #include <gtsam/navigation/ImuBias.h>
 #include <gtsam/nonlinear/Values.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
@@ -491,7 +492,10 @@ void GlobalMapping::update_submaps() {
   }
 }
 
-gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(const gtsam::NonlinearFactorGraph& new_factors, const gtsam::Values& new_values) {
+gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(
+  const gtsam::NonlinearFactorGraph& new_factors,
+  const gtsam::Values& new_values,
+  const int recovery_depth) {
   gtsam_points::ISAM2ResultExt result;
 
   gtsam::Key indeterminant_nearby_key = 0;
@@ -513,16 +517,80 @@ gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(const gtsam::NonlinearF
     logger->error(e.what());
   }
 
+  constexpr int kMaxRecoveryDepth = 6;
+  if (indeterminant_nearby_key != 0 && recovery_depth >= kMaxRecoveryDepth) {
+    logger->error(
+      "giving up ISAM2 recovery at depth {} near {}",
+      recovery_depth,
+      gtsam::Symbol(indeterminant_nearby_key));
+    return result;
+  }
+
   if (indeterminant_nearby_key != 0) {
     const gtsam::Symbol symbol(indeterminant_nearby_key);
-    if (symbol.chr() == 'v' || symbol.chr() == 'b' || symbol.chr() == 'e') {
-      indeterminant_nearby_key = X(symbol.index() / 2);
+    if (symbol.chr() == 'l') {
+      logger->warn("insert a landmark prior at {} to prevent corruption", std::string(symbol));
+      gtsam::Values values = isam2->getLinearizationPoint();
+      gtsam::NonlinearFactorGraph fix;
+      if (values.exists(indeterminant_nearby_key)) {
+        const gtsam::Point3 p = values.at<gtsam::Point3>(indeterminant_nearby_key);
+        fix.emplace_shared<gtsam::PriorFactor<gtsam::Point3>>(
+          indeterminant_nearby_key,
+          p,
+          gtsam::noiseModel::Isotropic::Sigma(3, 0.5));
+        return update_isam2(fix, gtsam::Values(), recovery_depth + 1);
+      }
+      return result;
     }
-    logger->warn("insert a damping factor at {} to prevent corruption", std::string(gtsam::Symbol(indeterminant_nearby_key)));
+
+    if (symbol.chr() == 'v') {
+      logger->warn("insert a velocity prior at {} to prevent corruption", std::string(symbol));
+      gtsam::Values values = isam2->getLinearizationPoint();
+      if (values.exists(indeterminant_nearby_key)) {
+        gtsam::NonlinearFactorGraph fix;
+        fix.emplace_shared<gtsam::PriorFactor<gtsam::Vector3>>(
+          indeterminant_nearby_key,
+          values.at<gtsam::Vector3>(indeterminant_nearby_key),
+          gtsam::noiseModel::Isotropic::Sigma(3, 0.1));
+        return update_isam2(fix, gtsam::Values(), recovery_depth + 1);
+      }
+      return result;
+    }
+
+    if (symbol.chr() == 'b') {
+      logger->warn("insert an IMU bias prior at {} to prevent corruption", std::string(symbol));
+      gtsam::Values values = isam2->getLinearizationPoint();
+      if (values.exists(indeterminant_nearby_key)) {
+        gtsam::NonlinearFactorGraph fix;
+        fix.emplace_shared<gtsam::PriorFactor<gtsam::imuBias::ConstantBias>>(
+          indeterminant_nearby_key,
+          values.at<gtsam::imuBias::ConstantBias>(indeterminant_nearby_key),
+          gtsam::noiseModel::Isotropic::Sigma(6, 0.01));
+        return update_isam2(fix, gtsam::Values(), recovery_depth + 1);
+      }
+      return result;
+    }
+
+    if (symbol.chr() == 'e') {
+      logger->warn("insert an endpoint prior at {} to prevent corruption", std::string(symbol));
+      gtsam::Values values = isam2->getLinearizationPoint();
+      if (values.exists(indeterminant_nearby_key)) {
+        gtsam::NonlinearFactorGraph fix;
+        fix.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(
+          indeterminant_nearby_key,
+          values.at<gtsam::Pose3>(indeterminant_nearby_key),
+          gtsam::noiseModel::Isotropic::Sigma(6, 0.05));
+        return update_isam2(fix, gtsam::Values(), recovery_depth + 1);
+      }
+      return result;
+    }
+
+    gtsam::Key damp_key = indeterminant_nearby_key;
+    logger->warn("insert a damping factor at {} to prevent corruption", std::string(gtsam::Symbol(damp_key)));
 
     gtsam::Values values = isam2->getLinearizationPoint();
     gtsam::NonlinearFactorGraph factors = isam2->getFactorsUnsafe();
-    factors.emplace_shared<gtsam_points::LinearDampingFactor>(indeterminant_nearby_key, 6, 1e3);
+    factors.emplace_shared<gtsam_points::LinearDampingFactor>(damp_key, 6, 1e3);
 
     gtsam::ISAM2Params isam2_params;
     if (params.use_isam2_dogleg) {
@@ -538,8 +606,8 @@ gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(const gtsam::NonlinearF
       isam2.reset(new gtsam_points::ISAM2ExtDummy(isam2_params));
     }
 
-    logger->warn("reset isam2");
-    return update_isam2(factors, values);
+    logger->warn("reset isam2 (recovery depth {})", recovery_depth + 1);
+    return update_isam2(factors, values, recovery_depth + 1);
   }
 
   return result;
