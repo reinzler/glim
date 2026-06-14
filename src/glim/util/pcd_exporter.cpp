@@ -274,6 +274,19 @@ bool save_pcd_xyzrgb(
     return false;
   }
 
+  const Eigen::Vector4f* camera_colors = nullptr;
+  if (color_mode == PCDColorMode::CAMERA) {
+    if (!cloud.aux_attributes.count("colors")) {
+      fill_stats(cloud, 0, stats);
+      return false;
+    }
+    camera_colors = cloud.aux_attribute<Eigen::Vector4f>("colors");
+    if (!camera_colors) {
+      fill_stats(cloud, 0, stats);
+      return false;
+    }
+  }
+
   const auto [z_min, z_max] = minmax_z(cloud);
   const auto [i_min, i_max] = robust_minmax_intensity(cloud);
 
@@ -319,6 +332,11 @@ bool save_pcd_xyzrgb(
       t = std::sqrt(t);
 
       std::tie(r, g, b) = ramp_color(t);
+    } else if (color_mode == PCDColorMode::CAMERA) {
+      const Eigen::Vector4f& c = camera_colors[idx];
+      r = static_cast<std::uint8_t>(std::clamp(c.x(), 0.0f, 1.0f) * 255.0f);
+      g = static_cast<std::uint8_t>(std::clamp(c.y(), 0.0f, 1.0f) * 255.0f);
+      b = static_cast<std::uint8_t>(std::clamp(c.z(), 0.0f, 1.0f) * 255.0f);
     }
 
     const std::array<float, 4> row = {

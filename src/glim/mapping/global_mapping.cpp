@@ -730,6 +730,14 @@ void GlobalMapping::save(const std::string& path) {
     } else {
       logger->warn("failed to export map_xyzrgb_height.pcd");
     }
+
+    if (merged_map->aux_attributes.count("colors")) {
+      if (save_pcd_xyzrgb(path + "/map_xyzrgb_camera.pcd", *merged_map, PCDColorMode::CAMERA, &stats)) {
+        logger->info("exported map_xyzrgb_camera.pcd written={} input={}", stats.written_points, stats.input_points);
+      } else {
+        logger->warn("failed to export map_xyzrgb_camera.pcd");
+      }
+    }
   } else {
     logger->warn("skip PCD export: merged map is empty");
   }
@@ -777,10 +785,13 @@ gtsam_points::PointCloud::Ptr GlobalMapping::export_points() {
   points.reserve(total_points);
 
   bool export_intensities = true;
+  bool export_colors = false;
   for (const auto& submap : submaps) {
     if (!submap || !submap->frame || !submap->frame->has_intensities()) {
       export_intensities = false;
-      break;
+    }
+    if (submap && submap->frame && submap->frame->aux_attributes.count("colors")) {
+      export_colors = true;
     }
   }
 
@@ -789,9 +800,19 @@ gtsam_points::PointCloud::Ptr GlobalMapping::export_points() {
     intensities.reserve(total_points);
   }
 
+  std::vector<Eigen::Vector4f> colors;
+  if (export_colors) {
+    colors.reserve(total_points);
+  }
+
   for (const auto& submap : submaps) {
     if (!submap || !submap->frame) {
       continue;
+    }
+
+    const Eigen::Vector4f* submap_colors = nullptr;
+    if (export_colors && submap->frame->aux_attributes.count("colors")) {
+      submap_colors = submap->frame->aux_attribute<Eigen::Vector4f>("colors");
     }
 
     for (int i = 0; i < submap->frame->size(); i++) {
@@ -801,6 +822,12 @@ gtsam_points::PointCloud::Ptr GlobalMapping::export_points() {
       if (export_intensities) {
         intensities.push_back(submap->frame->intensities[i]);
       }
+
+      if (export_colors && submap_colors) {
+        colors.push_back(submap_colors[i]);
+      } else if (export_colors) {
+        colors.emplace_back(0.5f, 0.5f, 0.5f, 1.0f);
+      }
     }
   }
 
@@ -808,6 +835,9 @@ gtsam_points::PointCloud::Ptr GlobalMapping::export_points() {
     merged->add_points(points);
     if (export_intensities) {
       merged->add_intensities(intensities);
+    }
+    if (export_colors) {
+      merged->add_aux_attribute("colors", colors);
     }
   }
 

@@ -9,7 +9,8 @@ namespace glim {
 
 enum class PCDColorMode {
   HEIGHT,
-  INTENSITY
+  INTENSITY,
+  CAMERA
 };
 
 struct PCDExportStats {
