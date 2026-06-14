@@ -230,8 +230,12 @@ void GlobalMapping::insert_submap(const SubMap::Ptr& submap) {
   new_values.reset(new gtsam::Values);
   new_factors.reset(new gtsam::NonlinearFactorGraph);
 
-  update_submaps();
-  Callbacks::on_update_submaps(submaps);
+  if (last_isam2_update_ok_) {
+    update_submaps();
+    Callbacks::on_update_submaps(submaps);
+  } else {
+    logger->warn("skip submap pose refresh after failed ISAM2 update (keep odometry poses)");
+  }
 }
 
 void GlobalMapping::insert_submap(int current, const SubMap::Ptr& submap) {
@@ -515,6 +519,7 @@ gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(
   } catch (const std::exception& e) {
     logger->error("an exception was caught during global map optimization!!");
     logger->error(e.what());
+    last_isam2_update_ok_ = false;
   }
 
   constexpr int kMaxRecoveryDepth = 6;
@@ -523,6 +528,7 @@ gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(
       "giving up ISAM2 recovery at depth {} near {}",
       recovery_depth,
       gtsam::Symbol(indeterminant_nearby_key));
+    last_isam2_update_ok_ = false;
     return result;
   }
 
@@ -540,6 +546,7 @@ gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(
           gtsam::noiseModel::Isotropic::Sigma(3, 0.5));
         return update_isam2(fix, gtsam::Values(), recovery_depth + 1);
       }
+      last_isam2_update_ok_ = false;
       return result;
     }
 
@@ -554,6 +561,7 @@ gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(
           gtsam::noiseModel::Isotropic::Sigma(3, 0.1));
         return update_isam2(fix, gtsam::Values(), recovery_depth + 1);
       }
+      last_isam2_update_ok_ = false;
       return result;
     }
 
@@ -568,6 +576,7 @@ gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(
           gtsam::noiseModel::Isotropic::Sigma(6, 0.01));
         return update_isam2(fix, gtsam::Values(), recovery_depth + 1);
       }
+      last_isam2_update_ok_ = false;
       return result;
     }
 
@@ -582,34 +591,19 @@ gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(
           gtsam::noiseModel::Isotropic::Sigma(6, 0.05));
         return update_isam2(fix, gtsam::Values(), recovery_depth + 1);
       }
+      last_isam2_update_ok_ = false;
       return result;
     }
 
     gtsam::Key damp_key = indeterminant_nearby_key;
     logger->warn("insert a damping factor at {} to prevent corruption", std::string(gtsam::Symbol(damp_key)));
 
-    gtsam::Values values = isam2->getLinearizationPoint();
-    gtsam::NonlinearFactorGraph factors = isam2->getFactorsUnsafe();
-    factors.emplace_shared<gtsam_points::LinearDampingFactor>(damp_key, 6, 1e3);
-
-    gtsam::ISAM2Params isam2_params;
-    if (params.use_isam2_dogleg) {
-      gtsam::ISAM2DoglegParams dogleg_params;
-      isam2_params.setOptimizationParams(dogleg_params);
-    }
-    isam2_params.relinearizeSkip = params.isam2_relinearize_skip;
-    isam2_params.setRelinearizeThreshold(params.isam2_relinearize_thresh);
-
-    if (params.enable_optimization) {
-      isam2.reset(new gtsam_points::ISAM2Ext(isam2_params));
-    } else {
-      isam2.reset(new gtsam_points::ISAM2ExtDummy(isam2_params));
-    }
-
-    logger->warn("reset isam2 (recovery depth {})", recovery_depth + 1);
-    return update_isam2(factors, values, recovery_depth + 1);
+    gtsam::NonlinearFactorGraph fix;
+    fix.emplace_shared<gtsam_points::LinearDampingFactor>(damp_key, 6, 1e3);
+    return update_isam2(fix, gtsam::Values(), recovery_depth + 1);
   }
 
+  last_isam2_update_ok_ = true;
   return result;
 }
 

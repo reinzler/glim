@@ -86,6 +86,8 @@ private:
   void update_submaps();
   gtsam_points::ISAM2ResultExt update_isam2(const gtsam::NonlinearFactorGraph& new_factors, const gtsam::Values& new_values, int recovery_depth = 0);
 
+  bool last_isam2_update_ok_ = true;
+
   void recover_graph() override;
   std::pair<gtsam::NonlinearFactorGraph, gtsam::Values> recover_graph(const gtsam::NonlinearFactorGraph& graph, const gtsam::Values& values, int start_from_frame_id) const;
 
