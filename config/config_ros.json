@@ -63,6 +63,7 @@
     "tf_time_offset": 1e-6,
     // Extension modules
     "extension_modules": [
+      "librerun_debugger.so",
       "libmemory_monitor.so",
       "libstandard_viewer.so",
       "librviz_viewer.so"
