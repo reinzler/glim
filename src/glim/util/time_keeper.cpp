@@ -59,6 +59,14 @@ bool TimeKeeper::validate_imu_stamp(const double imu_stamp) {
 bool TimeKeeper::process(const glim::RawPoints::Ptr& points) {
   replace_points_stamp(points);
 
+  // Keep PR290-style timestamp attributes in the same units as RawPoints::times
+  // after relative/absolute conversion and scaling.
+  if (points->points.size() == points->times.size()) {
+    points->attrs.timestamp = points->times;
+  } else {
+    points->attrs.timestamp.reset();
+  }
+
   if (points->points.size() != points->times.size()) {
     // Here must not be reached
     spdlog::error("inconsistent # of points and # of timestamps found after time conversion!! |points|={} |times|={}", points->points.size(), points->times.size());

@@ -24,7 +24,78 @@
 #include <tbb/task_arena.h>
 #endif
 
+#include <unordered_map>
+
 namespace glim {
+
+namespace {
+
+std::vector<Eigen::Vector4d> deskew_scan_points(
+    CloudDeskewing& deskewing,
+    const Eigen::Isometry3d& T_imu_lidar,
+    const std::vector<double>& pred_imu_times,
+    const std::vector<Eigen::Isometry3d>& pred_imu_poses,
+    const PreprocessedFrame& raw_frame) {
+  const bool has_scanner_ids =
+    raw_frame.attrs.scanner_id.has_value() && raw_frame.attrs.scanner_id->size() == raw_frame.points.size();
+
+  if (!has_scanner_ids) {
+    return deskewing.deskew(
+      T_imu_lidar,
+      pred_imu_times,
+      pred_imu_poses,
+      raw_frame.stamp,
+      raw_frame.times,
+      raw_frame.points);
+  }
+
+  std::unordered_map<std::uint8_t, std::vector<std::size_t>> groups;
+  groups.reserve(4);
+  for (std::size_t i = 0; i < raw_frame.points.size(); i++) {
+    groups[(*raw_frame.attrs.scanner_id)[i]].push_back(i);
+  }
+
+  if (groups.size() <= 1) {
+    return deskewing.deskew(
+      T_imu_lidar,
+      pred_imu_times,
+      pred_imu_poses,
+      raw_frame.stamp,
+      raw_frame.times,
+      raw_frame.points);
+  }
+
+  std::vector<Eigen::Vector4d> deskewed(raw_frame.points.size());
+  for (const auto& [scanner_id, indices] : groups) {
+    (void)scanner_id;
+
+    std::vector<double> times;
+    std::vector<Eigen::Vector4d> points;
+    times.reserve(indices.size());
+    points.reserve(indices.size());
+
+    for (const std::size_t index : indices) {
+      times.push_back(raw_frame.times[index]);
+      points.push_back(raw_frame.points[index]);
+    }
+
+    const auto sub_deskewed = deskewing.deskew(
+      T_imu_lidar,
+      pred_imu_times,
+      pred_imu_poses,
+      raw_frame.stamp,
+      times,
+      points);
+
+    for (std::size_t i = 0; i < indices.size(); i++) {
+      deskewed[indices[i]] = sub_deskewed[i];
+    }
+  }
+
+  return deskewed;
+}
+
+}  // namespace
 
 using Callbacks = OdometryEstimationCallbacks;
 
@@ -301,8 +372,9 @@ EstimationFrame::ConstPtr OdometryEstimationIMU::insert_frame(const Preprocessed
     }
   }
 
-  // Deskew and tranform points into IMU frame
-  auto deskewed = deskewing->deskew(T_imu_lidar, pred_imu_times, pred_imu_poses, raw_frame->stamp, raw_frame->times, raw_frame->points);
+  // Deskew per scanner_id when present (FAST-LIO UndistortPclMultiLiDAR style),
+  // then transform points into IMU frame.
+  auto deskewed = deskew_scan_points(*deskewing, T_imu_lidar, pred_imu_times, pred_imu_poses, *raw_frame);
   for (auto& pt : deskewed) {
     pt = T_imu_lidar * pt;
   }

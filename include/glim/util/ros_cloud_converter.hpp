@@ -9,6 +9,7 @@
 #include <boost/format.hpp>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 
 #include <Eigen/Core>
 #include <gtsam_points/types/point_cloud.hpp>
@@ -105,6 +106,10 @@ static RawPoints::Ptr extract_raw_points(const PointCloud2& points_msg, const st
   int y_type = 0;
   int z_type = 0;
   int time_type = 0;  // ouster and livox
+  int t_type = 0;
+  int time_name_type = 0;
+  int time_stamp_type = 0;
+  int timestamp_type = 0;
   int intensity_type = 0;
   int color_type = 0;
   int ring_type = 0;
@@ -115,6 +120,10 @@ static RawPoints::Ptr extract_raw_points(const PointCloud2& points_msg, const st
   int y_offset = -1;
   int z_offset = -1;
   int time_offset = -1;
+  int t_offset = -1;
+  int time_name_offset = -1;
+  int time_stamp_offset = -1;
+  int timestamp_offset = -1;
   int intensity_offset = -1;
   int color_offset = -1;
   int ring_offset = -1;
@@ -125,10 +134,10 @@ static RawPoints::Ptr extract_raw_points(const PointCloud2& points_msg, const st
   fields["x"] = std::make_pair(&x_type, &x_offset);
   fields["y"] = std::make_pair(&y_type, &y_offset);
   fields["z"] = std::make_pair(&z_type, &z_offset);
-  fields["t"] = std::make_pair(&time_type, &time_offset);
-  fields["time"] = std::make_pair(&time_type, &time_offset);
-  fields["time_stamp"] = std::make_pair(&time_type, &time_offset);
-  fields["timestamp"] = std::make_pair(&time_type, &time_offset);
+  fields["t"] = std::make_pair(&t_type, &t_offset);
+  fields["time"] = std::make_pair(&time_name_type, &time_name_offset);
+  fields["time_stamp"] = std::make_pair(&time_stamp_type, &time_stamp_offset);
+  fields["timestamp"] = std::make_pair(&timestamp_type, &timestamp_offset);
   fields[intensity_channel] = std::make_pair(&intensity_type, &intensity_offset);
   fields["rgba"] = std::make_pair(&color_type, &color_offset);
   fields["rgb"] = std::make_pair(&color_type, &color_offset);
@@ -148,12 +157,29 @@ static RawPoints::Ptr extract_raw_points(const PointCloud2& points_msg, const st
     *found->second.second = field.offset;
   }
 
+  // Prefer Livox/merged relative nanoseconds over legacy absolute timestamp aliases.
+  if (t_offset >= 0) {
+    time_type = t_type;
+    time_offset = t_offset;
+  } else if (time_name_offset >= 0) {
+    time_type = time_name_type;
+    time_offset = time_name_offset;
+  } else if (time_stamp_offset >= 0) {
+    time_type = time_stamp_type;
+    time_offset = time_stamp_offset;
+  } else if (timestamp_offset >= 0) {
+    time_type = timestamp_type;
+    time_offset = timestamp_offset;
+  }
+
+  const double header_time = to_sec(points_msg.header.stamp);
+
   if (x_offset < 0 || y_offset < 0 || z_offset < 0) {
     spdlog::warn("missing point coordinate fields");
     return nullptr;
   }
 
-  if ((x_type != PointField::FLOAT32 && x_type != PointField::FLOAT64) || x_type != y_type || x_type != y_type) {
+  if ((x_type != PointField::FLOAT32 && x_type != PointField::FLOAT64) || x_type != y_type || x_type != z_type) {
     spdlog::warn("unsupported points type");
     return nullptr;
   }
@@ -191,18 +217,48 @@ static RawPoints::Ptr extract_raw_points(const PointCloud2& points_msg, const st
   if (time_offset >= 0) {
     raw_points->times.resize(num_points);
 
+    const auto decode_float_time = [&](const double raw_time) {
+      if (!std::isfinite(raw_time)) {
+        return 0.0;
+      }
+
+      double time = raw_time;
+      if (raw_time > 1e15) {
+        // Livox custom bags may store absolute UNIX nanoseconds in FLOAT64 timestamp.
+        time = raw_time * 1e-9 - header_time;
+      } else if (raw_time > 1e9) {
+        // Absolute UNIX seconds.
+        time = raw_time - header_time;
+      }
+
+      if (time < 0.0 && time > -1e-6) {
+        time = 0.0;
+      }
+
+      return time;
+    };
+
     for (int i = 0; i < num_points; i++) {
       const auto* time_ptr = &points_msg.data[points_msg.point_step * i + time_offset];
       switch (time_type) {
-        case PointField::UINT32:
-          raw_points->times[i] = *reinterpret_cast<const uint32_t*>(time_ptr) / 1e9;
+        case PointField::UINT32: {
+          std::uint32_t v = 0;
+          std::memcpy(&v, time_ptr, sizeof(v));
+          raw_points->times[i] = v / 1e9;
           break;
-        case PointField::FLOAT32:
-          raw_points->times[i] = *reinterpret_cast<const float*>(time_ptr);
+        }
+        case PointField::FLOAT32: {
+          float v = 0.0f;
+          std::memcpy(&v, time_ptr, sizeof(v));
+          raw_points->times[i] = decode_float_time(static_cast<double>(v));
           break;
-        case PointField::FLOAT64:
-          raw_points->times[i] = *reinterpret_cast<const double*>(time_ptr);
+        }
+        case PointField::FLOAT64: {
+          double v = 0.0;
+          std::memcpy(&v, time_ptr, sizeof(v));
+          raw_points->times[i] = decode_float_time(v);
           break;
+        }
         default:
           spdlog::warn("unsupported time type {}", time_type);
           return nullptr;
@@ -333,7 +389,7 @@ static RawPoints::Ptr extract_raw_points(const PointCloud2& points_msg, const st
     raw_points->attrs.clear();
   }
 
-  raw_points->stamp = to_sec(points_msg.header.stamp);
+  raw_points->stamp = header_time;
   return raw_points;
 }
 
