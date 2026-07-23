@@ -20,7 +20,7 @@ public:
   OdometryEstimationGPUParams();
   virtual ~OdometryEstimationGPUParams();
 
-  enum class KeyframeUpdateStrategy { OVERLAP, DISPLACEMENT, ENTROPY };
+  enum class KeyframeUpdateStrategy { OVERLAP, DISPLACEMENT, ENTROPY, FIXED_INTERVAL_FIFO };
 
 public:
   // Registration params
@@ -41,6 +41,7 @@ public:
   double keyframe_delta_trans;
   double keyframe_delta_rot;
   double keyframe_entropy_thresh;
+  int keyframe_fixed_interval;
 };
 
 /**
@@ -62,6 +63,7 @@ private:
   void update_keyframes_overlap(int current);
   void update_keyframes_displacement(int current);
   void update_keyframes_entropy(const gtsam::NonlinearFactorGraph& matching_cost_factors, int current);
+  void update_keyframes_fixed_interval_fifo(int current);
 
 private:
   // Keyframe params

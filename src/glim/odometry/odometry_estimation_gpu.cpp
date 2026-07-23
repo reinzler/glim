@@ -1,5 +1,11 @@
 #include <glim/odometry/odometry_estimation_gpu.hpp>
 
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+
+#include <cuda_runtime.h>
 #include <spdlog/spdlog.h>
 
 #include <gtsam/inference/Symbol.h>
@@ -27,6 +33,91 @@
 #include <glim/odometry/callbacks.hpp>
 
 namespace glim {
+
+namespace {
+
+enum class GPUFrameFenceMode {
+  DISABLED,
+  AFTER_SMOOTHER,
+  BEFORE_OVERLAP,
+  BOTH,
+};
+
+bool env_flag_enabled(const char* name) {
+  const char* value = std::getenv(name);
+  if (!value || !*value) {
+    return false;
+  }
+
+  return std::strcmp(value, "0") != 0 &&
+         std::strcmp(value, "false") != 0 &&
+         std::strcmp(value, "FALSE") != 0 &&
+         std::strcmp(value, "off") != 0 &&
+         std::strcmp(value, "OFF") != 0;
+}
+
+GPUFrameFenceMode gpu_frame_fence_mode() {
+  static const GPUFrameFenceMode mode = [] {
+    const char* value = std::getenv("GLIM_GPU_FRAME_FENCE");
+    if (!value || !*value || std::strcmp(value, "off") == 0 || std::strcmp(value, "0") == 0) {
+      return GPUFrameFenceMode::DISABLED;
+    }
+    if (std::strcmp(value, "after_smoother") == 0) {
+      return GPUFrameFenceMode::AFTER_SMOOTHER;
+    }
+    if (std::strcmp(value, "before_overlap") == 0) {
+      return GPUFrameFenceMode::BEFORE_OVERLAP;
+    }
+    if (std::strcmp(value, "both") == 0) {
+      return GPUFrameFenceMode::BOTH;
+    }
+
+    spdlog::warn(
+      "[gpu-frame-probe] unknown GLIM_GPU_FRAME_FENCE='{}'; disabling frame fence",
+      value);
+    return GPUFrameFenceMode::DISABLED;
+  }();
+
+  return mode;
+}
+
+const char* gpu_frame_fence_mode_name() {
+  switch (gpu_frame_fence_mode()) {
+    case GPUFrameFenceMode::DISABLED:
+      return "off";
+    case GPUFrameFenceMode::AFTER_SMOOTHER:
+      return "after_smoother";
+    case GPUFrameFenceMode::BEFORE_OVERLAP:
+      return "before_overlap";
+    case GPUFrameFenceMode::BOTH:
+      return "both";
+  }
+
+  return "off";
+}
+
+bool gpu_frame_trace_enabled() {
+  static const bool enabled = env_flag_enabled("GLIM_GPU_FRAME_TRACE");
+  return enabled;
+}
+
+void synchronize_gpu_frame_boundary(const char* boundary, int current) {
+  const cudaError_t status = cudaDeviceSynchronize();
+  if (status != cudaSuccess) {
+    spdlog::critical(
+      "[gpu-frame-probe] cudaDeviceSynchronize failed boundary={} current={} error={}",
+      boundary,
+      current,
+      cudaGetErrorString(status));
+    throw std::runtime_error("GLIM GPU frame-boundary synchronization failed");
+  }
+
+  if (gpu_frame_trace_enabled()) {
+    spdlog::info("[gpu-frame-trace] current={} phase={} fence=complete", current, boundary);
+  }
+}
+
+}  // namespace
 
 using Callbacks = OdometryEstimationCallbacks;
 
@@ -56,8 +147,12 @@ OdometryEstimationGPUParams::OdometryEstimationGPUParams() : OdometryEstimationI
     keyframe_strategy = KeyframeUpdateStrategy::DISPLACEMENT;
   } else if (strategy == "ENTROPY") {
     keyframe_strategy = KeyframeUpdateStrategy::ENTROPY;
+  } else if (strategy == "FIXED_INTERVAL_FIFO") {
+    keyframe_strategy = KeyframeUpdateStrategy::FIXED_INTERVAL_FIFO;
   } else {
     spdlog::error("unknown keyframe update strategy {}", strategy);
+    spdlog::warn("falling back to keyframe update strategy OVERLAP");
+    keyframe_strategy = KeyframeUpdateStrategy::OVERLAP;
   }
 
   keyframe_min_overlap = config.param<double>("odometry_estimation", "keyframe_min_overlap", 0.1);
@@ -65,6 +160,7 @@ OdometryEstimationGPUParams::OdometryEstimationGPUParams() : OdometryEstimationI
   keyframe_delta_trans = config.param<double>("odometry_estimation", "keyframe_delta_trans", 1.0);
   keyframe_delta_rot = config.param<double>("odometry_estimation", "keyframe_delta_rot", 0.25);
   keyframe_entropy_thresh = config.param<double>("odometry_estimation", "keyframe_entropy_thresh", 0.99);
+  keyframe_fixed_interval = std::max(1, config.param<int>("odometry_estimation", "keyframe_fixed_interval", 10));
 }
 
 OdometryEstimationGPUParams::~OdometryEstimationGPUParams() {}
@@ -73,8 +169,51 @@ OdometryEstimationGPU::OdometryEstimationGPU(const OdometryEstimationGPUParams& 
   entropy_num_frames = 0;
   entropy_running_average = 0.0;
 
+  // Controls only the GPU odometry RoundRobin pool.
+  // Sub-mapping and global-mapping use independent pools.
+  int odometry_cuda_streams = 4;
+
+  const char* streams_env = std::getenv("GTSAM_POINTS_CUDA_STREAMS");
+  if (streams_env != nullptr) {
+    char* parse_end = nullptr;
+    const long requested = std::strtol(streams_env, &parse_end, 10);
+
+    if (
+      streams_env[0] != '\0' &&
+      parse_end != streams_env &&
+      *parse_end == '\0' &&
+      requested >= 1 &&
+      requested <= 64
+    ) {
+      odometry_cuda_streams = static_cast<int>(requested);
+    } else {
+      spdlog::warn(
+        "[gpu-roundrobin] invalid GTSAM_POINTS_CUDA_STREAMS='{}'; "
+        "using default=4 (valid range: 1..64)",
+        streams_env);
+    }
+  }
+
   stream.reset(new gtsam_points::CUDAStream());
-  stream_buffer_roundrobin.reset(new gtsam_points::StreamTempBufferRoundRobin());
+  stream_buffer_roundrobin.reset(
+    new gtsam_points::StreamTempBufferRoundRobin(odometry_cuda_streams));
+
+  spdlog::info(
+    "[gpu-roundrobin] odometry_streams={}",
+    odometry_cuda_streams);
+
+  spdlog::info(
+    "[gpu-frame-probe] frame_fence={} trace={}",
+    gpu_frame_fence_mode_name(),
+    gpu_frame_trace_enabled() ? "on" : "off");
+
+  const auto gpu_params = static_cast<const OdometryEstimationGPUParams*>(this->params.get());
+  if (gpu_params->keyframe_strategy == OdometryEstimationGPUParams::KeyframeUpdateStrategy::FIXED_INTERVAL_FIFO) {
+    spdlog::info(
+      "[keyframe-policy] strategy=FIXED_INTERVAL_FIFO interval={} max_keyframes={} overlap_gpu=off",
+      gpu_params->keyframe_fixed_interval,
+      gpu_params->max_num_keyframes);
+  }
 }
 
 OdometryEstimationGPU::~OdometryEstimationGPU() {
@@ -107,7 +246,37 @@ void OdometryEstimationGPU::create_frame(EstimationFrame::Ptr& new_frame) {
 }
 
 void OdometryEstimationGPU::update_frames(const int current, const gtsam::NonlinearFactorGraph& new_factors) {
+  const auto fence_mode = gpu_frame_fence_mode();
+  if (fence_mode == GPUFrameFenceMode::AFTER_SMOOTHER || fence_mode == GPUFrameFenceMode::BOTH) {
+    synchronize_gpu_frame_boundary("after_smoother", current);
+  }
+
+  if (gpu_frame_trace_enabled()) {
+    logger->info(
+      "[gpu-frame-trace] current={} stamp={:.9f} phase=before_estimates factors={} keyframes={}",
+      current,
+      frames[current]->stamp,
+      new_factors.size(),
+      keyframes.size());
+  }
+
   OdometryEstimationIMU::update_frames(current, new_factors);
+
+  if (gpu_frame_trace_enabled()) {
+    const auto& translation = frames[current]->T_world_imu.translation();
+    logger->info(
+      "[gpu-frame-trace] current={} stamp={:.9f} phase=after_estimates xyz=[{:.6f},{:.6f},{:.6f}] keyframes={}",
+      current,
+      frames[current]->stamp,
+      translation.x(),
+      translation.y(),
+      translation.z(),
+      keyframes.size());
+  }
+
+  if (fence_mode == GPUFrameFenceMode::BEFORE_OVERLAP || fence_mode == GPUFrameFenceMode::BOTH) {
+    synchronize_gpu_frame_boundary("before_overlap", current);
+  }
 
   const auto params = static_cast<OdometryEstimationGPUParams*>(this->params.get());
   switch (params->keyframe_strategy) {
@@ -119,6 +288,9 @@ void OdometryEstimationGPU::update_frames(const int current, const gtsam::Nonlin
       break;
     case OdometryEstimationGPUParams::KeyframeUpdateStrategy::ENTROPY:
       update_keyframes_entropy(new_factors, current);
+      break;
+    case OdometryEstimationGPUParams::KeyframeUpdateStrategy::FIXED_INTERVAL_FIFO:
+      update_keyframes_fixed_interval_fifo(current);
       break;
   }
 
@@ -186,10 +358,6 @@ gtsam::NonlinearFactorGraph OdometryEstimationGPU::create_factors(const int curr
       continue;
     }
 
-    auto stream_buffer = stream_buffer_roundrobin->get_stream_buffer();
-    const auto& stream = stream_buffer.first;
-    const auto& buffer = stream_buffer.second;
-
     double span = frames[current]->stamp - keyframe->stamp;
     if (span > params->smoother_lag - 0.1 || !frames[keyframe->id]) {
       // Create unary factor
@@ -206,6 +374,72 @@ gtsam::NonlinearFactorGraph OdometryEstimationGPU::create_factors(const int curr
 }
 
 /**
+ * @brief Deterministic keyframe management based only on frame indices.
+ *
+ * A keyframe is inserted after keyframe_fixed_interval valid frames have
+ * elapsed since the most recently inserted keyframe. When the active set is
+ * full, the oldest keyframe is removed. No overlap or pose-dependent metric
+ * is used for insertion or eviction decisions.
+ */
+void OdometryEstimationGPU::update_keyframes_fixed_interval_fifo(int current) {
+  const auto params = static_cast<OdometryEstimationGPUParams*>(this->params.get());
+
+  if (!frames[current]->frame->size()) {
+    return;
+  }
+
+  if (keyframes.empty()) {
+    keyframes.push_back(frames[current]);
+    if (gpu_frame_trace_enabled()) {
+      logger->info(
+        "[gpu-frame-trace] current={} stamp={:.9f} phase=fixed_interval_fifo action=seed interval={} keyframes=1",
+        current,
+        frames[current]->stamp,
+        params->keyframe_fixed_interval);
+    }
+    return;
+  }
+
+  const int frames_since_last_keyframe = current - keyframes.back()->id;
+  if (frames_since_last_keyframe < params->keyframe_fixed_interval) {
+    if (gpu_frame_trace_enabled()) {
+      logger->info(
+        "[gpu-frame-trace] current={} stamp={:.9f} phase=fixed_interval_fifo action=retain since_last={} interval={} keyframes={}",
+        current,
+        frames[current]->stamp,
+        frames_since_last_keyframe,
+        params->keyframe_fixed_interval,
+        keyframes.size());
+    }
+    return;
+  }
+
+  keyframes.push_back(frames[current]);
+
+  std::vector<EstimationFrame::ConstPtr> marginalized_keyframes;
+  const int max_keyframes = std::max(1, params->max_num_keyframes);
+  while (keyframes.size() > max_keyframes) {
+    marginalized_keyframes.push_back(keyframes.front());
+    keyframes.erase(keyframes.begin());
+  }
+
+  if (gpu_frame_trace_enabled()) {
+    const int evicted_id = marginalized_keyframes.empty() ? -1 : marginalized_keyframes.back()->id;
+    logger->info(
+      "[gpu-frame-trace] current={} stamp={:.9f} phase=fixed_interval_fifo action=add interval={} evicted={} keyframes={}",
+      current,
+      frames[current]->stamp,
+      params->keyframe_fixed_interval,
+      evicted_id,
+      keyframes.size());
+  }
+
+  if (!marginalized_keyframes.empty()) {
+    Callbacks::on_marginalized_keyframes(marginalized_keyframes);
+  }
+}
+
+/**
  * @brief Keyframe management based on an overlap metric
  * @ref   Koide et al., "Globally Consistent and Tightly Coupled 3D LiDAR Inertial Mapping", ICRA2022
  */
@@ -218,6 +452,12 @@ void OdometryEstimationGPU::update_keyframes_overlap(int current) {
 
   if (keyframes.empty()) {
     keyframes.push_back(frames[current]);
+    if (gpu_frame_trace_enabled()) {
+      logger->info(
+        "[gpu-frame-trace] current={} stamp={:.9f} phase=overlap action=seed keyframes=1",
+        current,
+        frames[current]->stamp);
+    }
     return;
   }
 
@@ -230,11 +470,28 @@ void OdometryEstimationGPU::update_keyframes_overlap(int current) {
 
   const double overlap = gtsam_points::overlap_gpu(keyframes_, frames[current]->frame, delta_from_keyframes, *stream);
   if (overlap > params->keyframe_max_overlap) {
+    if (gpu_frame_trace_enabled()) {
+      logger->info(
+        "[gpu-frame-trace] current={} stamp={:.9f} phase=overlap value={:.9f} action=retain keyframes={}",
+        current,
+        frames[current]->stamp,
+        overlap,
+        keyframes.size());
+    }
     return;
   }
 
   const auto& new_keyframe = frames[current];
   keyframes.push_back(new_keyframe);
+
+  if (gpu_frame_trace_enabled()) {
+    logger->info(
+      "[gpu-frame-trace] current={} stamp={:.9f} phase=overlap value={:.9f} action=add keyframes={}",
+      current,
+      frames[current]->stamp,
+      overlap,
+      keyframes.size());
+  }
 
   if (keyframes.size() <= params->max_num_keyframes) {
     return;
