@@ -1,6 +1,7 @@
 #pragma once
 
 #include <any>
+#include <limits>
 #include <spdlog/spdlog.h>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/serialization.hpp>
@@ -16,6 +17,15 @@ public:
 
   virtual void create_subscriber(rclcpp::Node& node) = 0;
   virtual void insert_message_instance(const rclcpp::SerializedMessage& serialized_msg, const std::string& msg_type = "") = 0;
+  /// Offline rosbag path: supply bag message time (seconds). Default ignores stamp
+  /// and falls back to the 2-arg overload so existing modules stay compatible.
+  virtual void insert_message_instance(
+    const rclcpp::SerializedMessage& serialized_msg,
+    const std::string& msg_type,
+    double bag_stamp) {
+    (void)bag_stamp;
+    insert_message_instance(serialized_msg, msg_type);
+  }
 
   const std::string topic;
   const std::string msg_type;
@@ -66,6 +76,74 @@ public:
   }
 
   const std::function<void(const std::shared_ptr<const Msg>&)> callback;
+  rclcpp::Serialization<Msg> serialization;
+  std::shared_ptr<rclcpp::Subscription<Msg>> sub;
+};
+
+/// Topic subscription that also delivers a timestamp.
+/// Offline (rosbag): stamp is the bag message time passed to the 3-arg insert.
+/// Live (create_subscriber): stamp is taken from the node clock at callback time.
+template <typename Msg>
+class StampedTopicSubscription : public GenericTopicSubscription {
+public:
+  template <typename Callback>
+  StampedTopicSubscription(const std::string& topic, const Callback& callback)
+  : GenericTopicSubscription(topic),
+    callback(callback) {}
+
+  template <typename Callback>
+  StampedTopicSubscription(const std::string& topic, const std::string& msg_type, const Callback& callback)
+  : GenericTopicSubscription(topic, msg_type),
+    callback(callback) {}
+
+  ~StampedTopicSubscription() {}
+
+  virtual void create_subscriber(rclcpp::Node& node) override {
+    if (!this->msg_type.empty()) {
+      const auto topics_and_types = node.get_topic_names_and_types();
+      const auto found = topics_and_types.find(topic);
+      if (found != topics_and_types.end()) {
+        for (const auto& type : found->second) {
+          if (type != this->msg_type) {
+            spdlog::warn("msg type mismatch: topic={} expected={} actual={}", topic, this->msg_type, type);
+          }
+        }
+      }
+    }
+
+    auto clock = node.get_clock();
+    sub = node.create_subscription<Msg>(topic, 100, [this, clock](const std::shared_ptr<Msg> msg) {
+      const double stamp = clock ? clock->now().seconds() : 0.0;
+      callback(msg, stamp);
+    });
+  }
+
+  virtual void insert_message_instance(const rclcpp::SerializedMessage& serialized_msg, const std::string& msg_type = "") override {
+    // Live/offline callers that omit stamp: use NaN so the module can reject or fall back.
+    insert_message_instance(serialized_msg, msg_type, std::numeric_limits<double>::quiet_NaN());
+  }
+
+  virtual void insert_message_instance(
+    const rclcpp::SerializedMessage& serialized_msg,
+    const std::string& msg_type,
+    double bag_stamp) override {
+    if (!msg_type.empty() && !this->msg_type.empty() && msg_type != this->msg_type) {
+      spdlog::warn("msg type mismatch: topic={} expected={} actual={}", topic, this->msg_type, msg_type);
+      return;
+    }
+
+    auto msg = std::make_shared<Msg>();
+    serialization.deserialize_message(&serialized_msg, msg.get());
+
+    if (msg == nullptr) {
+      spdlog::warn("failed to deserialize message on {}", topic);
+      return;
+    }
+
+    callback(msg, bag_stamp);
+  }
+
+  const std::function<void(const std::shared_ptr<const Msg>&, double)> callback;
   rclcpp::Serialization<Msg> serialization;
   std::shared_ptr<rclcpp::Subscription<Msg>> sub;
 };
