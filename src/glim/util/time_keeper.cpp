@@ -1,5 +1,7 @@
 #include <glim/util/time_keeper.hpp>
 
+#include <algorithm>
+#include <cmath>
 #include <optional>
 #include <spdlog/spdlog.h>
 #include <boost/format.hpp>
@@ -57,49 +59,112 @@ bool TimeKeeper::validate_imu_stamp(const double imu_stamp) {
 }
 
 bool TimeKeeper::process(const glim::RawPoints::Ptr& points) {
+  if (!points) {
+    spdlog::error("[time_keeper] null RawPoints");
+    return false;
+  }
+
+  if (points->size() == 0) {
+    spdlog::warn(
+      "[time_keeper] reject empty point cloud before timestamp conversion "
+      "stamp={:.9f}",
+      points->stamp);
+    return false;
+  }
+
   replace_points_stamp(points);
 
-  // Keep PR290-style timestamp attributes in the same units as RawPoints::times
-  // after relative/absolute conversion and scaling.
-  if (points->points.size() == points->times.size()) {
-    points->attrs.timestamp = points->times;
-  } else {
-    points->attrs.timestamp.reset();
-  }
-
   if (points->points.size() != points->times.size()) {
-    // Here must not be reached
-    spdlog::error("inconsistent # of points and # of timestamps found after time conversion!! |points|={} |times|={}", points->points.size(), points->times.size());
-  }
-  if (points->times.front() < 0.0 || points->times.back() < 0.0) {
-    // Here must not be reached
-    spdlog::error("negative per-point timestamp is found after time conversion!! front={:.6f} back={:.6f}", points->times.front(), points->times.back());
-  }
-  if (points->times.front() > 1.0 || points->times.back() > 1.0) {
-    // Here must not be reached
-    spdlog::error("large per-point timestamp is found after time conversion!! front={:.6f} back={:.6f}", points->times.front(), points->times.back());
-  }
-  if (points->stamp < 0.0) {
-    spdlog::warn("frame timestamp is negative!! frame={:.6f}", points->stamp);
-  }
-  if (points->stamp > 3000000000) {
-    spdlog::warn("frame timestamp is wrong (or GLIM has been used for over 40 years)!! frame={:.6f}", points->stamp);
+    spdlog::error(
+      "[time_keeper] inconsistent points/timestamps after conversion "
+      "|points|={} |times|={}",
+      points->points.size(),
+      points->times.size());
+
+    points->attrs.timestamp.reset();
+    return false;
   }
 
-  const double time_diff = points->stamp - last_points_stamp;
+  if (!std::isfinite(points->stamp)) {
+    spdlog::error(
+      "[time_keeper] non-finite frame timestamp: {}",
+      points->stamp);
+    return false;
+  }
+
+  const auto minmax_times =
+    std::minmax_element(
+      points->times.begin(),
+      points->times.end());
+
+  const double min_time = *minmax_times.first;
+  const double max_time = *minmax_times.second;
+
+  if (!std::isfinite(min_time) || !std::isfinite(max_time)) {
+    spdlog::error(
+      "[time_keeper] non-finite per-point timestamp "
+      "min={} max={}",
+      min_time,
+      max_time);
+    return false;
+  }
+
+  points->attrs.timestamp = points->times;
+
+  if (min_time < 0.0) {
+    spdlog::error(
+      "negative per-point timestamp is found after time conversion!! "
+      "min={:.9f} max={:.9f}",
+      min_time,
+      max_time);
+  }
+
+  if (max_time > 1.0) {
+    spdlog::error(
+      "large per-point timestamp is found after time conversion!! "
+      "min={:.9f} max={:.9f}",
+      min_time,
+      max_time);
+  }
+
+  if (points->stamp < 0.0) {
+    spdlog::warn(
+      "frame timestamp is negative!! frame={:.6f}",
+      points->stamp);
+  }
+
+  if (points->stamp > 3000000000.0) {
+    spdlog::warn(
+      "frame timestamp is wrong "
+      "(or GLIM has been used for over 40 years)!! "
+      "frame={:.6f}",
+      points->stamp);
+  }
+
+  const double time_diff =
+    points->stamp - last_points_stamp;
+
   if (last_points_stamp < 0.0) {
-    // First LiDAR frame
+    // First LiDAR frame.
   } else if (time_diff < 0.0) {
     spdlog::warn("point timestamp rewind detected!!");
-    spdlog::warn("current={:.6f} last={:.6f} diff={:.6f}", points->stamp, last_points_stamp, time_diff);
+    spdlog::warn(
+      "current={:.6f} last={:.6f} diff={:.6f}",
+      points->stamp,
+      last_points_stamp,
+      time_diff);
     return false;
   } else if (time_diff > 0.5) {
-    spdlog::warn("large time gap between consecutive LiDAR frames!!");
-    spdlog::warn("current={:.6f} last={:.6f} diff={:.6f}", points->stamp, last_points_stamp, time_diff);
+    spdlog::warn(
+      "large time gap between consecutive LiDAR frames!!");
+    spdlog::warn(
+      "current={:.6f} last={:.6f} diff={:.6f}",
+      points->stamp,
+      last_points_stamp,
+      time_diff);
   }
 
   last_points_stamp = points->stamp;
-
   return true;
 }
 
