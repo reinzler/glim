@@ -18,6 +18,20 @@
 #ifdef GLIM_ROS2
 #include <sensor_msgs/msg/point_cloud2.hpp>
 namespace glim {
+
+/// Read a trivially-copyable scalar from a potentially unaligned
+/// PointCloud2 byte address.
+///
+/// PointCloud2 permits packed point records whose point_step is not aligned
+/// to the natural alignment of float, double, uint16_t, etc. Dereferencing a
+/// reinterpret_cast pointer at such an address is undefined behavior.
+template <typename T>
+static inline T load_unaligned(const void* ptr) noexcept {
+  T value{};
+  std::memcpy(&value, ptr, sizeof(T));
+  return value;
+}
+
 using PointCloud2 = sensor_msgs::msg::PointCloud2;
 using PointCloud2Ptr = sensor_msgs::msg::PointCloud2::SharedPtr;
 using PointCloud2ConstPtr = sensor_msgs::msg::PointCloud2::ConstSharedPtr;
@@ -63,7 +77,7 @@ namespace glim {
 
 template <typename T>
 Eigen::Vector4d get_vec4(const void* x, const void* y, const void* z) {
-  return Eigen::Vector4d(*reinterpret_cast<const T*>(x), *reinterpret_cast<const T*>(y), *reinterpret_cast<const T*>(z), 1.0);
+  return Eigen::Vector4d(load_unaligned<T>(x), load_unaligned<T>(y), load_unaligned<T>(z), 1.0);
 }
 
 static bool read_uint8_like_field(const PointCloud2& points_msg, int datatype, int offset, int point_index, std::uint8_t& out) {
@@ -71,28 +85,28 @@ static bool read_uint8_like_field(const PointCloud2& points_msg, int datatype, i
 
   switch (datatype) {
     case PointField::INT8:
-      out = static_cast<std::uint8_t>(std::clamp<int>(*reinterpret_cast<const std::int8_t*>(ptr), 0, 255));
+      out = static_cast<std::uint8_t>(std::clamp<int>(load_unaligned<std::int8_t>(ptr), 0, 255));
       return true;
     case PointField::UINT8:
-      out = *reinterpret_cast<const std::uint8_t*>(ptr);
+      out = load_unaligned<std::uint8_t>(ptr);
       return true;
     case PointField::INT16:
-      out = static_cast<std::uint8_t>(std::clamp<int>(*reinterpret_cast<const std::int16_t*>(ptr), 0, 255));
+      out = static_cast<std::uint8_t>(std::clamp<int>(load_unaligned<std::int16_t>(ptr), 0, 255));
       return true;
     case PointField::UINT16:
-      out = static_cast<std::uint8_t>(std::clamp<int>(*reinterpret_cast<const std::uint16_t*>(ptr), 0, 255));
+      out = static_cast<std::uint8_t>(std::clamp<int>(load_unaligned<std::uint16_t>(ptr), 0, 255));
       return true;
     case PointField::INT32:
-      out = static_cast<std::uint8_t>(std::clamp<long>(*reinterpret_cast<const std::int32_t*>(ptr), 0L, 255L));
+      out = static_cast<std::uint8_t>(std::clamp<long>(load_unaligned<std::int32_t>(ptr), 0L, 255L));
       return true;
     case PointField::UINT32:
-      out = static_cast<std::uint8_t>(std::min<std::uint32_t>(*reinterpret_cast<const std::uint32_t*>(ptr), 255U));
+      out = static_cast<std::uint8_t>(std::min<std::uint32_t>(load_unaligned<std::uint32_t>(ptr), 255U));
       return true;
     case PointField::FLOAT32:
-      out = static_cast<std::uint8_t>(std::clamp<int>(static_cast<int>(std::lround(*reinterpret_cast<const float*>(ptr))), 0, 255));
+      out = static_cast<std::uint8_t>(std::clamp<int>(static_cast<int>(std::lround(load_unaligned<float>(ptr))), 0, 255));
       return true;
     case PointField::FLOAT64:
-      out = static_cast<std::uint8_t>(std::clamp<long>(static_cast<long>(std::llround(*reinterpret_cast<const double*>(ptr))), 0L, 255L));
+      out = static_cast<std::uint8_t>(std::clamp<long>(static_cast<long>(std::llround(load_unaligned<double>(ptr))), 0L, 255L));
       return true;
     default:
       return false;
@@ -273,19 +287,19 @@ static RawPoints::Ptr extract_raw_points(const PointCloud2& points_msg, const st
       const auto* intensity_ptr = &points_msg.data[points_msg.point_step * i + intensity_offset];
       switch (intensity_type) {
         case PointField::UINT8:
-          raw_points->intensities[i] = *reinterpret_cast<const std::uint8_t*>(intensity_ptr);
+          raw_points->intensities[i] = load_unaligned<std::uint8_t>(intensity_ptr);
           break;
         case PointField::UINT16:
-          raw_points->intensities[i] = *reinterpret_cast<const std::uint16_t*>(intensity_ptr);
+          raw_points->intensities[i] = load_unaligned<std::uint16_t>(intensity_ptr);
           break;
         case PointField::UINT32:
-          raw_points->intensities[i] = *reinterpret_cast<const std::uint32_t*>(intensity_ptr);
+          raw_points->intensities[i] = load_unaligned<std::uint32_t>(intensity_ptr);
           break;
         case PointField::FLOAT32:
-          raw_points->intensities[i] = *reinterpret_cast<const float*>(intensity_ptr);
+          raw_points->intensities[i] = load_unaligned<float>(intensity_ptr);
           break;
         case PointField::FLOAT64:
-          raw_points->intensities[i] = *reinterpret_cast<const double*>(intensity_ptr);
+          raw_points->intensities[i] = load_unaligned<double>(intensity_ptr);
           break;
         default:
           spdlog::warn("unsupported intensity type {}", intensity_type);
@@ -314,13 +328,13 @@ static RawPoints::Ptr extract_raw_points(const PointCloud2& points_msg, const st
       const auto* ring_ptr = &points_msg.data[points_msg.point_step * i + ring_offset];
       switch (ring_type) {
         case PointField::UINT8:
-          raw_points->rings[i] = *reinterpret_cast<const std::uint8_t*>(ring_ptr);
+          raw_points->rings[i] = load_unaligned<std::uint8_t>(ring_ptr);
           break;
         case PointField::UINT16:
-          raw_points->rings[i] = *reinterpret_cast<const std::uint16_t*>(ring_ptr);
+          raw_points->rings[i] = load_unaligned<std::uint16_t>(ring_ptr);
           break;
         case PointField::UINT32:
-          raw_points->rings[i] = *reinterpret_cast<const std::uint32_t*>(ring_ptr);
+          raw_points->rings[i] = load_unaligned<std::uint32_t>(ring_ptr);
           break;
         default:
           spdlog::warn("unsupported ring type {}", ring_type);
