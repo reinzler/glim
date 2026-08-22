@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <cmath>
 #include <spdlog/spdlog.h>
 #include <gtsam_points/config.hpp>
 #include <gtsam_points/ann/kdtree.hpp>
@@ -51,6 +52,44 @@ std::vector<std::size_t> find_nearest_raw_indices(
   return indices;
 }
 
+bool azimuth_in_range(double az_deg, double min_deg, double max_deg) {
+  auto norm360 = [](double a) {
+    while (a < 0.0) a += 360.0;
+    while (a >= 360.0) a -= 360.0;
+    return a;
+  };
+  const double az = norm360(az_deg);
+  const double a = norm360(min_deg);
+  const double b = norm360(max_deg);
+  if (a <= b) {
+    return az >= a && az <= b;
+  }
+  return az >= a || az <= b;
+}
+
+bool point_removed_by_angular_mask(const Eigen::Vector3d& p, const CloudPreprocessorParams& params) {
+  const double h = std::hypot(p.x(), p.y());
+  if (h < 1e-6 && std::abs(p.z()) < 1e-6) {
+    return false;
+  }
+  const double elev_deg = std::atan2(p.z(), h) * 180.0 / M_PI;
+  if (params.remove_elevation_below_deg > -900.0 && elev_deg < params.remove_elevation_below_deg) {
+    return true;
+  }
+  if (params.remove_elevation_above_deg < 900.0 && elev_deg > params.remove_elevation_above_deg) {
+    return true;
+  }
+  if (!params.remove_azimuth_ranges_deg.empty()) {
+    const double az_deg = std::atan2(p.y(), p.x()) * 180.0 / M_PI;
+    for (const auto& [lo, hi] : params.remove_azimuth_ranges_deg) {
+      if (azimuth_in_range(az_deg, lo, hi)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 
@@ -92,6 +131,19 @@ CloudPreprocessorParams::CloudPreprocessorParams() {
 
   k_correspondences = config.param<int>("preprocess", "k_correspondences", 8);
 
+  enable_angular_mask = config.param<bool>("preprocess", "enable_angular_mask", false);
+  remove_elevation_below_deg = config.param<double>("preprocess", "remove_elevation_below_deg", -999.0);
+  remove_elevation_above_deg = config.param<double>("preprocess", "remove_elevation_above_deg", 999.0);
+  if (enable_angular_mask) {
+    const auto ranges = config.param<std::vector<double>>("preprocess", "remove_azimuth_ranges_deg", {});
+    if (ranges.size() % 2 != 0) {
+      throw std::runtime_error("remove_azimuth_ranges_deg must have an even number of values [min,max,...]");
+    }
+    for (std::size_t i = 0; i + 1 < ranges.size(); i += 2) {
+      remove_azimuth_ranges_deg.emplace_back(ranges[i], ranges[i + 1]);
+    }
+  }
+
   num_threads = config.param<int>("preprocess", "num_threads", 2);
 
   scan_guard.enable = config.param<bool>("scan_guard", "enable", true);
@@ -121,6 +173,13 @@ CloudPreprocessor::CloudPreprocessor(const CloudPreprocessorParams& params) : pa
     params.scan_guard.min_effective_points,
     params.scan_guard.max_empty_scan_burst,
     params.scan_guard.drop_empty_frame);
+  if (params.enable_angular_mask) {
+    spdlog::info(
+      "[angular_mask] enabled elev_below={} elev_above={} azimuth_ranges={}",
+      params.remove_elevation_below_deg,
+      params.remove_elevation_above_deg,
+      params.remove_azimuth_ranges_deg.size());
+  }
 }
 
 CloudPreprocessor::~CloudPreprocessor() {}
@@ -230,6 +289,22 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess_impl(const RawPoints::Const
     } else {
       throw std::runtime_error(fmt::format("Unsupported crop bbox frame: {}", params.crop_bbox_frame));
     }
+  }
+
+  // Angular sector mask (lidar frame)
+  if (params.enable_angular_mask && frame && frame->size() > 0) {
+    const std::size_t before = frame->size();
+    frame = gtsam_points::filter(frame, [&](const auto& pt) {
+      return !point_removed_by_angular_mask(pt.template head<3>(), params);
+    });
+    const std::size_t after = frame ? frame->size() : 0;
+    const double removed_frac = before ? static_cast<double>(before - after) / static_cast<double>(before) : 0.0;
+    spdlog::info(
+      "[angular_mask] stamp={:.6f} before={} after={} removed_frac={:.4f}",
+      raw_points->stamp,
+      before,
+      after,
+      removed_frac);
   }
 
   // Outlier removal

@@ -34,6 +34,13 @@ public:
   Eigen::Vector3d crop_bbox_min;      ///< Bounding box min point
   Eigen::Vector3d crop_bbox_max;      ///< Bounding box max point
   Eigen::Isometry3d T_imu_lidar;      ///< LiDAR-IMU transformation when cropbox is defined in IMU frame
+
+  /// Angular sector mask in lidar frame (azimuth=atan2(y,x), elevation=atan2(z,hypot(x,y))).
+  bool enable_angular_mask = false;
+  double remove_elevation_below_deg = -999.0;  ///< Remove points with elevation < this (deg); disabled if <= -900
+  double remove_elevation_above_deg = 999.0;   ///< Remove points with elevation > this (deg); disabled if >= 900
+  std::vector<std::pair<double, double>> remove_azimuth_ranges_deg;  ///< Each [min,max] deg interval to remove
+
   int k_correspondences;              ///< Number of neighboring points
 
   int num_threads;                    ///< Number of threads
