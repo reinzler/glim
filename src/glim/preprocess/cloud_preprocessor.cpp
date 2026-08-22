@@ -1,3 +1,4 @@
+#include <Eigen/Eigenvalues>
 #include <glim/preprocess/cloud_preprocessor.hpp>
 #include <glim/preprocess/callbacks.hpp>
 
@@ -5,6 +6,7 @@
 #include <iostream>
 #include <limits>
 #include <cmath>
+#include <algorithm>
 #include <spdlog/spdlog.h>
 #include <gtsam_points/config.hpp>
 #include <gtsam_points/ann/kdtree.hpp>
@@ -65,6 +67,60 @@ bool azimuth_in_range(double az_deg, double min_deg, double max_deg) {
     return az >= a && az <= b;
   }
   return az >= a || az <= b;
+}
+
+Eigen::Vector3d normal_mask_axis_vector(const std::string& axis) {
+  if (axis == "y") {
+    return Eigen::Vector3d(0.0, 1.0, 0.0);
+  }
+  if (axis == "z") {
+    return Eigen::Vector3d(0.0, 0.0, 1.0);
+  }
+  return Eigen::Vector3d(1.0, 0.0, 0.0);
+}
+
+std::vector<double> estimate_normal_alignment_scores(
+    const gtsam_points::PointCloudCPU::Ptr& frame,
+    const Eigen::Vector3d& axis,
+    int k,
+    int /*num_threads*/) {
+  const int n = frame->size();
+  std::vector<double> scores(n, 0.0);
+  if (n < 4) {
+    return scores;
+  }
+
+  gtsam_points::KdTree tree(frame->points, n);
+  const int k_use = std::max(3, std::min(k, n - 1));
+
+  std::vector<size_t> k_indices(k_use);
+  std::vector<double> k_sq_dists(k_use);
+
+  for (int i = 0; i < n; ++i) {
+    tree.knn_search(frame->points[i].data(), k_use, k_indices.data(), k_sq_dists.data());
+
+    Eigen::Vector3d mean = Eigen::Vector3d::Zero();
+    for (int j = 0; j < k_use; ++j) {
+      mean += frame->points[k_indices[j]].template head<3>();
+    }
+    mean /= static_cast<double>(k_use);
+
+    Eigen::Matrix3d cov = Eigen::Matrix3d::Zero();
+    for (int j = 0; j < k_use; ++j) {
+      const Eigen::Vector3d d = frame->points[k_indices[j]].template head<3>() - mean;
+      cov += d * d.transpose();
+    }
+    cov /= static_cast<double>(std::max(1, k_use - 1));
+
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(cov);
+    Eigen::Vector3d normal = es.eigenvectors().col(0);
+    if (normal.norm() > 1e-12) {
+      normal.normalize();
+    }
+    scores[i] = std::abs(normal.dot(axis));
+  }
+
+  return scores;
 }
 
 bool point_removed_by_angular_mask(const Eigen::Vector3d& p, const CloudPreprocessorParams& params) {
@@ -144,6 +200,16 @@ CloudPreprocessorParams::CloudPreprocessorParams() {
     }
   }
 
+  enable_normal_mask = config.param<bool>("preprocess", "enable_normal_mask", false);
+  normal_mask_axis = config.param<std::string>("preprocess", "normal_mask_axis", "x");
+  normal_mask_near_cos = config.param<double>("preprocess", "normal_mask_near_cos", 0.5);
+  normal_mask_remove_frac = config.param<double>("preprocess", "normal_mask_remove_frac", 0.0);
+  normal_mask_k = config.param<int>("preprocess", "normal_mask_k", 10);
+  if (normal_mask_axis != "x" && normal_mask_axis != "y" && normal_mask_axis != "z") {
+    throw std::runtime_error(fmt::format("normal_mask_axis must be x, y, or z (got {})", normal_mask_axis));
+  }
+  normal_mask_remove_frac = std::max(0.0, std::min(1.0, normal_mask_remove_frac));
+
   num_threads = config.param<int>("preprocess", "num_threads", 2);
 
   scan_guard.enable = config.param<bool>("scan_guard", "enable", true);
@@ -179,6 +245,14 @@ CloudPreprocessor::CloudPreprocessor(const CloudPreprocessorParams& params) : pa
       params.remove_elevation_below_deg,
       params.remove_elevation_above_deg,
       params.remove_azimuth_ranges_deg.size());
+  }
+  if (params.enable_normal_mask) {
+    spdlog::info(
+      "[normal_mask] enabled axis={} near_cos={} remove_frac={} k={}",
+      params.normal_mask_axis,
+      params.normal_mask_near_cos,
+      params.normal_mask_remove_frac,
+      params.normal_mask_k);
   }
 }
 
@@ -310,6 +384,64 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess_impl(const RawPoints::Const
   // Outlier removal
   if (params.enable_outlier_removal) {
     frame = gtsam_points::remove_outliers(frame, params.outlier_removal_k, params.outlier_std_mul_factor, params.num_threads);
+  }
+
+  // Normal-aligned rejection (dose-controlled via normal_mask_remove_frac)
+  if (params.enable_normal_mask && frame && frame->size() > 0 && params.normal_mask_remove_frac > 0.0) {
+    const std::size_t before = frame->size();
+    const Eigen::Vector3d axis = normal_mask_axis_vector(params.normal_mask_axis);
+    const auto scores = estimate_normal_alignment_scores(frame, axis, params.normal_mask_k, params.num_threads);
+
+    std::vector<int> target_indices;
+    target_indices.reserve(scores.size());
+    for (int i = 0; i < static_cast<int>(scores.size()); ++i) {
+      if (scores[i] >= params.normal_mask_near_cos) {
+        target_indices.push_back(i);
+      }
+    }
+
+    std::vector<char> remove_mask(scores.size(), 0);
+    std::size_t n_remove = 0;
+    if (!target_indices.empty()) {
+      std::sort(target_indices.begin(), target_indices.end(), [&](int a, int b) {
+        return scores[a] > scores[b];
+      });
+      n_remove =
+          static_cast<std::size_t>(std::llround(params.normal_mask_remove_frac * static_cast<double>(target_indices.size())));
+      const std::size_t min_keep = static_cast<std::size_t>(params.scan_guard.min_filtered_points);
+      if (scores.size() - n_remove < min_keep) {
+        n_remove = scores.size() > min_keep ? scores.size() - min_keep : 0;
+      }
+      for (std::size_t i = 0; i < n_remove && i < target_indices.size(); ++i) {
+        remove_mask[target_indices[i]] = 1;
+      }
+    }
+
+    std::vector<int> keep_indices;
+    keep_indices.reserve(scores.size());
+    for (int i = 0; i < static_cast<int>(scores.size()); ++i) {
+      if (remove_mask[i] == 0) {
+        keep_indices.push_back(i);
+      }
+    }
+    frame = gtsam_points::sample(frame, keep_indices);
+
+    const std::size_t after = frame ? frame->size() : 0;
+    const std::size_t removed = before > after ? before - after : 0;
+    const double removed_frac = before ? static_cast<double>(removed) / static_cast<double>(before) : 0.0;
+    const double removed_frac_target =
+        target_indices.empty()
+            ? 0.0
+            : static_cast<double>(removed) / static_cast<double>(target_indices.size());
+    spdlog::info(
+      "[normal_mask] stamp={:.6f} before={} after={} removed_frac={:.4f} target_near={} target_removed={} removed_frac_target={:.4f}",
+      raw_points->stamp,
+      before,
+      after,
+      removed_frac,
+      target_indices.size(),
+      removed,
+      removed_frac_target);
   }
 
   PreprocessCallbacks::on_filtering_finished(frame);

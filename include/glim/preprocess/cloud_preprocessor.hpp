@@ -41,6 +41,14 @@ public:
   double remove_elevation_above_deg = 999.0;   ///< Remove points with elevation > this (deg); disabled if >= 900
   std::vector<std::pair<double, double>> remove_azimuth_ranges_deg;  ///< Each [min,max] deg interval to remove
 
+  /// Normal-aligned point rejection (lidar/body frame). Removes a configurable
+  /// fraction of points whose local surface normal aligns with target_axis.
+  bool enable_normal_mask = false;
+  std::string normal_mask_axis = "x";       ///< "x", "y", or "z" in lidar frame
+  double normal_mask_near_cos = 0.5;        ///< |n·d| >= this counts as target-normal point
+  double normal_mask_remove_frac = 0.0;     ///< Fraction of target-normal points to remove [0,1]
+  int normal_mask_k = 10;                   ///< kNN count for local PCA normal
+
   int k_correspondences;              ///< Number of neighboring points
 
   int num_threads;                    ///< Number of threads
