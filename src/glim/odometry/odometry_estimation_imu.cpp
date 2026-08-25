@@ -190,6 +190,21 @@ void OdometryEstimationIMU::insert_imu(const double stamp, const Eigen::Vector3d
   imu_integration->insert_imu(stamp, linear_acc, angular_vel);
 }
 
+int OdometryEstimationIMU::preinit_frame_action(double frame_stamp) const {
+  if (!init_estimation) {
+    return 1;
+  }
+  switch (init_estimation->preinit_action(frame_stamp)) {
+    case PreInitFrameAction::Drop:
+      return -1;
+    case PreInitFrameAction::Wait:
+      return 0;
+    case PreInitFrameAction::Ready:
+    default:
+      return 1;
+  }
+}
+
 EstimationFrame::ConstPtr OdometryEstimationIMU::insert_frame(const PreprocessedFrame::Ptr& raw_frame, std::vector<EstimationFrame::ConstPtr>& marginalized_frames) {
   if (raw_frame->size()) {
     logger->trace("insert_frame points={} times={} ~ {}", raw_frame->size(), raw_frame->times.front(), raw_frame->times.back());

@@ -46,10 +46,26 @@ void NaiveInitialStateEstimation::insert_imu(double stamp, const Eigen::Vector3d
     return;
   }
 
-  stamp = stamp;
+  // Parameter `stamp` shadows the member; assign explicitly (bag-time gate).
+  this->stamp = stamp;
   sum_acc += linear_acc;
 
-  ready = stamp - init_stamp > window_size && sum_acc.squaredNorm() > 10.0;
+  ready = this->stamp - init_stamp > window_size && sum_acc.squaredNorm() > 10.0;
+}
+
+PreInitFrameAction NaiveInitialStateEstimation::preinit_action(double frame_stamp) const {
+  if (force_init || ready) {
+    return PreInitFrameAction::Ready;
+  }
+  if (init_stamp < 1e-6) {
+    return PreInitFrameAction::Wait;  // no IMU yet
+  }
+  // Deterministic drop: frame entirely before the IMU init window.
+  if (frame_stamp <= init_stamp + window_size) {
+    return PreInitFrameAction::Drop;
+  }
+  // Past window in bag time but gravity/acc not ready — hold for more IMU.
+  return PreInitFrameAction::Wait;
 }
 
 EstimationFrame::ConstPtr NaiveInitialStateEstimation::initial_pose() {

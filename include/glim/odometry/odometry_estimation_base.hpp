@@ -61,6 +61,12 @@ public:
   virtual std::vector<EstimationFrame::ConstPtr> get_remaining_frames() { return std::vector<EstimationFrame::ConstPtr>(); }
 
   /**
+   * @brief Bag-time gate while waiting for initial IMU state.
+   * @return -1 drop frame, 0 wait (hold), 1 proceed with insert_frame
+   */
+  virtual int preinit_frame_action(double frame_stamp) const { return 1; }
+
+  /**
    * @brief Load an odometry estimation module from a dynamic library
    * @param so_name  Dynamic library name
    * @return         Loaded odometry estimation module

@@ -1,9 +1,41 @@
 #include <glim/odometry/async_odometry_estimation.hpp>
 
+#include <cstdlib>
+#include <fstream>
+#include <mutex>
+
 #include <spdlog/spdlog.h>
 #include <glim/util/logging.hpp>
 
 namespace glim {
+
+namespace {
+std::once_flag packet_log_once;
+std::ofstream packet_log_ofs;
+
+bool packet_log_enabled() {
+  const char* v = std::getenv("GLIM_LOG_PACKETS");
+  return v && v[0] != '\0' && v[0] != '0';
+}
+
+void log_packet(const char* site, size_t n_imu, size_t n_frames) {
+  if (!packet_log_enabled()) {
+    return;
+  }
+  std::call_once(packet_log_once, [] {
+    const char* path = std::getenv("GLIM_LOG_PACKETS");
+    // path may be "1" → default file; otherwise treat as filepath
+    const std::string p = (path && std::string(path) != "1" && std::string(path) != "true") ? path : "glim_packets.csv";
+    packet_log_ofs.open(p, std::ios::out | std::ios::app);
+    if (packet_log_ofs.tellp() == 0) {
+      packet_log_ofs << "site,n_imu,n_lidar_frames\n";
+    }
+  });
+  if (packet_log_ofs) {
+    packet_log_ofs << site << ',' << n_imu << ',' << n_frames << '\n';
+  }
+}
+}  // namespace
 
 AsyncOdometryEstimation::AsyncOdometryEstimation(const std::shared_ptr<OdometryEstimationBase>& odometry_estimation, bool enable_imu)
 : odometry_estimation(odometry_estimation),
@@ -62,6 +94,7 @@ void AsyncOdometryEstimation::run() {
   while (!kill_switch) {
     auto imu_frames = input_imu_queue.get_all_and_clear();
     auto new_raw_frames = input_frame_queue.get_all_and_clear();
+    log_packet("odom_drain", imu_frames.size(), new_raw_frames.size());
     raw_frames.insert(raw_frames.end(), new_raw_frames.begin(), new_raw_frames.end());
     internal_frame_queue_size = raw_frames.size();
 
@@ -124,8 +157,31 @@ void AsyncOdometryEstimation::run() {
       }
 
       const auto& frame = raw_frames.front();
+
+      // Bag-time gate before calling insert_frame (avoids silent wall-clock drops
+      // and avoids unbounded hold that deadlocks workload_guard).
+      const int pre = odometry_estimation->preinit_frame_action(frame->stamp);
+      if (pre < 0) {
+        logger->debug("dropping pre-init lidar frame stamp={:.6f} (before IMU init window)", frame->stamp);
+        raw_frames.pop_front();
+        internal_frame_queue_size = raw_frames.size();
+        continue;
+      }
+      if (pre == 0) {
+        logger->debug("holding lidar frame stamp={:.6f} until initial IMU state is ready", frame->stamp);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        break;
+      }
+
       std::vector<EstimationFrame::ConstPtr> marginalized;
       auto state = odometry_estimation->insert_frame(frame, marginalized);
+
+      if (!state) {
+        // Still not ready (e.g. race): hold briefly, do not discard.
+        logger->debug("holding lidar frame stamp={:.6f} (insert_frame returned null)", frame->stamp);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        break;
+      }
 
       output_estimation_results.push_back(state);
       output_marginalized_frames.insert(marginalized);

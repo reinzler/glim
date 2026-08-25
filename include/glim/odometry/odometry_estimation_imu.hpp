@@ -79,6 +79,7 @@ public:
   virtual void insert_imu(const double stamp, const Eigen::Vector3d& linear_acc, const Eigen::Vector3d& angular_vel) override;
   virtual EstimationFrame::ConstPtr insert_frame(const PreprocessedFrame::Ptr& frame, std::vector<EstimationFrame::ConstPtr>& marginalized_frames) override;
   virtual std::vector<EstimationFrame::ConstPtr> get_remaining_frames() override;
+  virtual int preinit_frame_action(double frame_stamp) const override;
 
 protected:
   virtual void create_frame(EstimationFrame::Ptr& frame) {}

@@ -11,6 +11,13 @@ class logger;
 
 namespace glim {
 
+/** What to do with a lidar frame while initial state is not ready (bag-time gate). */
+enum class PreInitFrameAction {
+  Wait,  // hold frame; need more IMU
+  Drop,  // discard; frame stamp is before init window (deterministic)
+  Ready  // init complete; insert normally
+};
+
 /**
  * @brief Initial sensor state estimator
  *
@@ -41,6 +48,11 @@ public:
    */
   virtual EstimationFrame::ConstPtr initial_pose() = 0;
 
+  /**
+   * @brief Bag-time gate for frames arriving before / during IMU init.
+   */
+  virtual PreInitFrameAction preinit_action(double frame_stamp) const { return PreInitFrameAction::Ready; }
+
 protected:
   // Logging
   std::shared_ptr<spdlog::logger> logger;
@@ -59,6 +71,7 @@ public:
 
   virtual void insert_imu(double stamp, const Eigen::Vector3d& linear_acc, const Eigen::Vector3d& angular_vel) override;
   virtual EstimationFrame::ConstPtr initial_pose() override;
+  virtual PreInitFrameAction preinit_action(double frame_stamp) const override;
 
   void set_init_state(const Eigen::Isometry3d& init_T_world_imu, const Eigen::Vector3d& init_v_world_imu);
 
