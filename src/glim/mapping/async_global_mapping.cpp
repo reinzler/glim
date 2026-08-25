@@ -81,12 +81,31 @@ gtsam_points::PointCloud::Ptr AsyncGlobalMapping::export_points() {
 void AsyncGlobalMapping::run() {
   auto last_optimization_time = std::chrono::high_resolution_clock::now();
 
+  // Layer 2 (science / det packaging): event-driven updates only.
+  // When set, do not run wall-clock optimize(); process one submap per wake
+  // (insert_submap already performs one iSAM2 update per closed submap).
+  const bool det_packaging = [] {
+    const char* v = std::getenv("GLIM_DET_PACKAGING");
+    return v && v[0] != '\0' && v[0] != '0';
+  }();
+  if (det_packaging) {
+    logger->info("Layer2 det packaging ON: one-submap drains, wall-clock optimize disabled");
+  }
+
   while (!kill_switch) {
 #ifdef GLIM_USE_OPENCV
     auto images = input_image_queue.get_all_and_clear();
 #endif
     auto imu_frames = input_imu_queue.get_all_and_clear();
-    auto submaps = input_submap_queue.get_all_and_clear();
+    // Event-driven: at most one submap per loop when det packaging is on.
+    std::vector<SubMap::Ptr> submaps;
+    if (det_packaging) {
+      if (auto sm = input_submap_queue.pop()) {
+        submaps.push_back(*sm);
+      }
+    } else {
+      submaps = input_submap_queue.get_all_and_clear();
+    }
 
     if (const char* v = std::getenv("GLIM_LOG_PACKETS"); v && v[0] != '\0' && v[0] != '0') {
       static std::ofstream ofs;
@@ -118,7 +137,12 @@ void AsyncGlobalMapping::run() {
         global_mapping->find_overlapping_submaps(min_overlap);
       }
 
-      if (request_to_optimize || std::chrono::high_resolution_clock::now() - last_optimization_time > std::chrono::seconds(optimization_interval)) {
+      // Science path: never optimize on wall clock — only on new submap / explicit request.
+      const bool wall_clock_due =
+          !det_packaging &&
+          (std::chrono::high_resolution_clock::now() - last_optimization_time >
+           std::chrono::seconds(optimization_interval));
+      if (request_to_optimize || wall_clock_due) {
         std::lock_guard<std::mutex> lock(global_mapping_mutex);
         request_to_optimize = false;
         global_mapping->optimize();
@@ -132,7 +156,7 @@ void AsyncGlobalMapping::run() {
         last_optimization_time = std::chrono::high_resolution_clock::now();
       }
 
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      std::this_thread::sleep_for(std::chrono::milliseconds(det_packaging ? 5 : 100));
       continue;
     }
 
