@@ -60,6 +60,13 @@ public:
   virtual std::vector<SubMap::Ptr> submit_end_of_sequence() { return std::vector<SubMap::Ptr>(); }
 
   /**
+   * @brief Force-close the open submap (same as EOS force_create) without waiting for
+   *        max_num_keyframes. Used by workload_guard to break pause deadlocks.
+   * @return true if a submap was created
+   */
+  virtual bool force_close_submap() { return false; }
+
+  /**
    * @brief Load a sub mapping module from a shared library
    * @param so_name  Shared library name
    * @return         Loaded sub mapping module

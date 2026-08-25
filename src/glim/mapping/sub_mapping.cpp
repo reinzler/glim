@@ -823,4 +823,30 @@ std::vector<SubMap::Ptr> SubMapping::submit_end_of_sequence() {
   return submaps;
 }
 
+bool SubMapping::force_close_submap() {
+  if (odom_frames.empty() && keyframes.empty()) {
+    return false;
+  }
+
+  auto new_submap = create_submap(true);
+  if (!new_submap) {
+    return false;
+  }
+
+  new_submap->id = submap_count++;
+  submap_queue.push_back(new_submap);
+  Callbacks::on_new_submap(new_submap);
+
+  odom_frames.clear();
+  keyframes.clear();
+  keyframe_indices.clear();
+  values.reset(new gtsam::Values);
+  graph.reset(new gtsam::NonlinearFactorGraph);
+
+  logger->warn(
+    "[force_close_submap] closed incomplete submap id={} (|keyframes| may be < max)",
+    new_submap->id);
+  return true;
+}
+
 }  // namespace glim

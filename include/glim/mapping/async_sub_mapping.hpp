@@ -66,12 +66,18 @@ public:
    */
   std::vector<SubMap::Ptr> get_results();
 
+  /**
+   * @brief Request force-close of the open submap (handled on the sub-mapping thread).
+   */
+  void request_force_close_submap();
+
 private:
   void run();
 
 private:
   std::atomic_bool kill_switch;      // Flag to stop the thread immediately (Hard kill switch)
   std::atomic_bool end_of_sequence;  // Flag to stop the thread when the input queues become empty (Soft kill switch)
+  std::atomic_bool force_close_requested{false};
   std::thread thread;
 
 #ifdef GLIM_USE_OPENCV

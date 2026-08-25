@@ -67,6 +67,8 @@ public:
 
   virtual std::vector<SubMap::Ptr> submit_end_of_sequence() override;
 
+  virtual bool force_close_submap() override;
+
 private:
   void insert_keyframe(const int current, const EstimationFrame::ConstPtr& odom_frame);
 
