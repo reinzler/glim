@@ -84,7 +84,11 @@ private:
   std::shared_ptr<gtsam::NonlinearFactorGraph> create_matching_cost_factors(int current) const;
 
   void update_submaps();
-  gtsam_points::ISAM2ResultExt update_isam2(const gtsam::NonlinearFactorGraph& new_factors, const gtsam::Values& new_values, int recovery_depth = 0);
+  gtsam_points::ISAM2ResultExt update_isam2(
+    const gtsam::NonlinearFactorGraph& new_factors,
+    const gtsam::Values& new_values,
+    int recovery_depth = 0,
+    const char* site = "update");
 
   bool last_isam2_update_ok_ = true;
 

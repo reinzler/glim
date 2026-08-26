@@ -1,37 +1,8 @@
 #include <glim/mapping/async_sub_mapping.hpp>
 
-#include <cstdlib>
-#include <fstream>
-#include <mutex>
+#include <glim/util/packet_log.hpp>
 
 namespace glim {
-
-namespace {
-std::once_flag sub_packet_log_once;
-std::ofstream sub_packet_log_ofs;
-
-bool sub_packet_log_enabled() {
-  const char* v = std::getenv("GLIM_LOG_PACKETS");
-  return v && v[0] != '\0' && v[0] != '0';
-}
-
-void log_sub_packet(size_t n_imu, size_t n_frames) {
-  if (!sub_packet_log_enabled()) {
-    return;
-  }
-  std::call_once(sub_packet_log_once, [] {
-    const char* path = std::getenv("GLIM_LOG_PACKETS");
-    const std::string p = (path && std::string(path) != "1" && std::string(path) != "true") ? path : "glim_packets.csv";
-    sub_packet_log_ofs.open(p, std::ios::out | std::ios::app);
-    if (sub_packet_log_ofs.tellp() == 0) {
-      sub_packet_log_ofs << "site,n_imu,n_lidar_frames\n";
-    }
-  });
-  if (sub_packet_log_ofs) {
-    sub_packet_log_ofs << "sub_drain," << n_imu << ',' << n_frames << '\n';
-  }
-}
-}  // namespace
 
 AsyncSubMapping::AsyncSubMapping(const std::shared_ptr<glim::SubMappingBase>& sub_mapping) : sub_mapping(sub_mapping) {
   kill_switch = false;
@@ -90,7 +61,7 @@ void AsyncSubMapping::run() {
 #endif
     auto imu_frames = input_imu_queue.get_all_and_clear();
     auto odom_frames = input_frame_queue.get_all_and_clear();
-    log_sub_packet(imu_frames.size(), odom_frames.size());
+    log_packet_row("sub_drain", imu_frames.size(), odom_frames.size());
 
     if (force_close_requested.exchange(false)) {
       if (sub_mapping->force_close_submap()) {

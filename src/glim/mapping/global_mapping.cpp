@@ -34,6 +34,7 @@
 #include <glim/util/pcd_exporter.hpp>
 #include <glim/util/mapcleaner_exporter.hpp>
 #include <glim/util/serialization.hpp>
+#include <glim/util/packet_log.hpp>
 #include <glim/common/imu_integration.hpp>
 #include <glim/mapping/callbacks.hpp>
 
@@ -224,7 +225,7 @@ void GlobalMapping::insert_submap(const SubMap::Ptr& submap) {
   logger->debug("|new_factors|={} |new_values|={}", new_factors->size(), new_values->size());
 
   Callbacks::on_smoother_update(*isam2, *new_factors, *new_values);
-  auto result = update_isam2(*new_factors, *new_values);
+  auto result = update_isam2(*new_factors, *new_values, 0, "insert_submap");
   Callbacks::on_smoother_update_result(*isam2, result);
 
   new_values.reset(new gtsam::Values);
@@ -354,7 +355,7 @@ void GlobalMapping::find_overlapping_submaps(double min_overlap) {
   logger->info("new overlapping {} submap pairs found", new_factors->size());
 
   Callbacks::on_smoother_update(*isam2, *new_factors, *new_values);
-  auto result = update_isam2(*new_factors, *new_values);
+  auto result = update_isam2(*new_factors, *new_values, 0, "find_overlapping");
   Callbacks::on_smoother_update_result(*isam2, result);
 
   new_factors->resize(0);
@@ -372,7 +373,7 @@ void GlobalMapping::optimize() {
   logger->debug("|new_factors|={} |new_values|={}", new_factors->size(), new_values->size());
 
   Callbacks::on_smoother_update(*isam2, *new_factors, *new_values);
-  auto result = update_isam2(*new_factors, *new_values);
+  auto result = update_isam2(*new_factors, *new_values, 0, "optimize");
 
   new_factors.reset(new gtsam::NonlinearFactorGraph);
   new_values.reset(new gtsam::Values);
@@ -499,8 +500,25 @@ void GlobalMapping::update_submaps() {
 gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(
   const gtsam::NonlinearFactorGraph& new_factors,
   const gtsam::Values& new_values,
-  const int recovery_depth) {
+  const int recovery_depth,
+  const char* site) {
   gtsam_points::ISAM2ResultExt result;
+
+  // N12 / N-H4: never call isam2->update with an empty increment on the primary path.
+  // Empty updates still run relinearization bookkeeping and make values.bin depend on
+  // wake count. Recovery calls always carry at least one fix factor.
+  const bool empty_increment = new_factors.empty() && new_values.empty();
+  if (empty_increment && recovery_depth == 0) {
+    log_isam2_update(site ? site : "update", 0, 0, recovery_depth, true);
+    return result;
+  }
+
+  log_isam2_update(
+    site ? site : "update",
+    new_factors.size(),
+    new_values.size(),
+    recovery_depth,
+    false);
 
   gtsam::Key indeterminant_nearby_key = 0;
   try {
@@ -544,7 +562,7 @@ gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(
           indeterminant_nearby_key,
           p,
           gtsam::noiseModel::Isotropic::Sigma(3, 0.5));
-        return update_isam2(fix, gtsam::Values(), recovery_depth + 1);
+        return update_isam2(fix, gtsam::Values(), recovery_depth + 1, "recovery_l");
       }
       last_isam2_update_ok_ = false;
       return result;
@@ -559,7 +577,7 @@ gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(
           indeterminant_nearby_key,
           values.at<gtsam::Vector3>(indeterminant_nearby_key),
           gtsam::noiseModel::Isotropic::Sigma(3, 0.1));
-        return update_isam2(fix, gtsam::Values(), recovery_depth + 1);
+        return update_isam2(fix, gtsam::Values(), recovery_depth + 1, "recovery_v");
       }
       last_isam2_update_ok_ = false;
       return result;
@@ -574,7 +592,7 @@ gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(
           indeterminant_nearby_key,
           values.at<gtsam::imuBias::ConstantBias>(indeterminant_nearby_key),
           gtsam::noiseModel::Isotropic::Sigma(6, 0.01));
-        return update_isam2(fix, gtsam::Values(), recovery_depth + 1);
+        return update_isam2(fix, gtsam::Values(), recovery_depth + 1, "recovery_b");
       }
       last_isam2_update_ok_ = false;
       return result;
@@ -589,7 +607,7 @@ gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(
           indeterminant_nearby_key,
           values.at<gtsam::Pose3>(indeterminant_nearby_key),
           gtsam::noiseModel::Isotropic::Sigma(6, 0.05));
-        return update_isam2(fix, gtsam::Values(), recovery_depth + 1);
+        return update_isam2(fix, gtsam::Values(), recovery_depth + 1, "recovery_e");
       }
       last_isam2_update_ok_ = false;
       return result;
@@ -600,7 +618,7 @@ gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(
 
     gtsam::NonlinearFactorGraph fix;
     fix.emplace_shared<gtsam_points::LinearDampingFactor>(damp_key, 6, 1e3);
-    return update_isam2(fix, gtsam::Values(), recovery_depth + 1);
+    return update_isam2(fix, gtsam::Values(), recovery_depth + 1, "recovery_damp");
   }
 
   last_isam2_update_ok_ = true;
@@ -1045,7 +1063,7 @@ bool GlobalMapping::load(const std::string& path) {
   if (start_from_frame_id <= 0) {
     logger->info("optimize");
     Callbacks::on_smoother_update(*isam2, graph, values);
-    auto result = update_isam2(graph, values);
+    auto result = update_isam2(graph, values, 0, "load");
     Callbacks::on_smoother_update_result(*isam2, result);
 
     update_submaps();
@@ -1064,7 +1082,7 @@ bool GlobalMapping::load(const std::string& path) {
 
 void GlobalMapping::recover_graph() {
   const auto recovered = recover_graph(isam2->getFactorsUnsafe(), isam2->calculateEstimate(), 0);
-  update_isam2(recovered.first, recovered.second);
+  update_isam2(recovered.first, recovered.second, 0, "recover_graph");
 }
 
 // Recover the graph by adding missing values and factors

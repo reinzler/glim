@@ -1,12 +1,12 @@
 #include <glim/mapping/async_global_mapping.hpp>
 
 #include <cstdlib>
-#include <fstream>
 #include <mutex>
 
 #include <spdlog/spdlog.h>
 
 #include <glim/util/logging.hpp>
+#include <glim/util/packet_log.hpp>
 #include <glim/mapping/callbacks.hpp>
 
 namespace glim {
@@ -107,20 +107,7 @@ void AsyncGlobalMapping::run() {
       submaps = input_submap_queue.get_all_and_clear();
     }
 
-    if (const char* v = std::getenv("GLIM_LOG_PACKETS"); v && v[0] != '\0' && v[0] != '0') {
-      static std::ofstream ofs;
-      static std::once_flag once;
-      std::call_once(once, [&] {
-        const std::string p = (std::string(v) != "1" && std::string(v) != "true") ? v : "glim_packets.csv";
-        ofs.open(p, std::ios::out | std::ios::app);
-        if (ofs.tellp() == 0) {
-          ofs << "site,n_imu,n_lidar_frames\n";
-        }
-      });
-      if (ofs) {
-        ofs << "global_drain," << imu_frames.size() << ',' << submaps.size() << '\n';
-      }
-    }
+    log_packet_row("global_drain", imu_frames.size(), submaps.size());
 
     if (
 #ifdef GLIM_USE_OPENCV

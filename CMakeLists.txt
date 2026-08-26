@@ -68,6 +68,7 @@ add_library(glim SHARED
   src/glim/util/data_validator.cpp
   src/glim/util/serialization.cpp
   src/glim/util/debug.cpp
+  src/glim/util/packet_log.cpp
   src/glim/util/pcd_exporter.cpp
   src/glim/util/mapcleaner_exporter.cpp
   # preprocess
