@@ -50,6 +50,7 @@ public:
   double submap_downsample_resolution;
   double submap_voxel_resolution;
   int submap_target_num_points;
+  int num_threads;
 };
 
 /**

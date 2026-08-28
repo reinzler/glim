@@ -79,6 +79,7 @@ GlobalMappingParams::GlobalMappingParams() {
   isam2_relinearize_thresh = config.param<double>("global_mapping", "isam2_relinearize_thresh", 0.1);
 
   init_pose_damping_scale = config.param<double>("global_mapping", "init_pose_damping_scale", 1e10);
+  num_threads = config.param<int>("global_mapping", "num_threads", 2);
 }
 
 GlobalMappingParams::~GlobalMappingParams() {}
@@ -346,7 +347,9 @@ void GlobalMapping::find_overlapping_submaps(double min_overlap) {
 #endif
       else {
         for (const auto& voxelmap : submaps[i]->voxelmaps) {
-          new_factors->emplace_shared<gtsam_points::IntegratedVGICPFactor>(X(i), X(j), voxelmap, subsampled_submaps[j]);
+          auto factor = gtsam::make_shared<gtsam_points::IntegratedVGICPFactor>(X(i), X(j), voxelmap, subsampled_submaps[j]);
+          factor->set_num_threads(params.num_threads);
+          new_factors->add(factor);
         }
       }
     }
@@ -407,7 +410,7 @@ std::shared_ptr<gtsam::NonlinearFactorGraph> GlobalMapping::create_between_facto
 
   auto factor = gtsam::make_shared<gtsam_points::IntegratedGICPFactor>(X(0), X(1), submaps[last]->frame, submaps[current]->frame);
   factor->set_max_correspondence_distance(0.5);
-  factor->set_num_threads(2);
+  factor->set_num_threads(params.num_threads);
   graph.add(factor);
 
   logger->debug("--- LM optimization ---");
@@ -462,7 +465,9 @@ std::shared_ptr<gtsam::NonlinearFactorGraph> GlobalMapping::create_matching_cost
 
     if (params.registration_error_factor_type == "VGICP") {
       for (const auto& voxelmap : submaps[i]->voxelmaps) {
-        factors->emplace_shared<gtsam_points::IntegratedVGICPFactor>(X(i), X(current), voxelmap, subsampled_submaps[current]);
+        auto factor = gtsam::make_shared<gtsam_points::IntegratedVGICPFactor>(X(i), X(current), voxelmap, subsampled_submaps[current]);
+        factor->set_num_threads(params.num_threads);
+        factors->add(factor);
       }
     }
 #ifdef GTSAM_POINTS_USE_CUDA
@@ -1035,7 +1040,9 @@ bool GlobalMapping::load(const std::string& path) {
 #endif
       } else {
         for (const auto& voxelmap : submaps[first]->voxelmaps) {
-          graph.emplace_shared<gtsam_points::IntegratedVGICPFactor>(X(first), X(second), voxelmap, subsampled_submaps[second]);
+          auto factor = gtsam::make_shared<gtsam_points::IntegratedVGICPFactor>(X(first), X(second), voxelmap, subsampled_submaps[second]);
+          factor->set_num_threads(params.num_threads);
+          graph.add(factor);
         }
       }
     } else {

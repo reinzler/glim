@@ -57,7 +57,7 @@ void CloudCovarianceEstimation::estimate(
   // Precompute pt * pt.transpose()
   std::vector<Eigen::Matrix4d> pt_cross(points.size());
   if (gtsam_points::is_omp_default()) {
-#pragma omp parallel for num_threads(num_threads) schedule(guided, 64)
+#pragma omp parallel for num_threads(num_threads) schedule(static)
     for (int i = 0; i < points.size(); i++) {
       pt_cross[i] = points[i] * points[i].transpose();
     }
@@ -103,7 +103,7 @@ void CloudCovarianceEstimation::estimate(
 
   // Calculate covariances
   if (gtsam_points::is_omp_default()) {
-#pragma omp parallel for num_threads(num_threads) schedule(guided, 8)
+#pragma omp parallel for num_threads(num_threads) schedule(static)
     for (int i = 0; i < points.size(); i++) {
       calc_cov(i);
     }

@@ -299,6 +299,7 @@ SubMappingParams::SubMappingParams() {
   submap_downsample_resolution = config.param<double>("sub_mapping", "submap_downsample_resolution", 0.25);
   submap_voxel_resolution = config.param<double>("sub_mapping", "submap_voxel_resolution", 0.5);
   submap_target_num_points = config.param<int>("sub_mapping", "submap_target_num_points", -1);
+  num_threads = config.param<int>("sub_mapping", "num_threads", 2);
 
   enable_gpu = false;
   if (registration_error_factor_type.find("GPU") != std::string::npos) {
@@ -312,7 +313,7 @@ SubMapping::SubMapping(const SubMappingParams& params) : params(params) {
   submap_count = 0;
   imu_integration.reset(new IMUIntegration);
   deskewing.reset(new CloudDeskewing);
-  covariance_estimation.reset(new CloudCovarianceEstimation);
+  covariance_estimation.reset(new CloudCovarianceEstimation(params.num_threads));
 
   values.reset(new gtsam::Values);
   graph.reset(new gtsam::NonlinearFactorGraph);
@@ -435,6 +436,7 @@ void SubMapping::insert_frame(const EstimationFrame::ConstPtr& odom_frame_) {
         noise_model = gtsam::noiseModel::Isotropic::Precision(6, 1e3);
       } else {
         auto factor = gtsam::make_shared<gtsam_points::IntegratedGICPFactor>(X(last), X(current), last_frame, current_frame);
+        factor->set_num_threads(params.num_threads);
         auto linearized = factor->linearize(*values);
         // graph->emplace_shared<gtsam::LinearContainerFactor>(linearized, *values);
 
@@ -523,7 +525,9 @@ void SubMapping::insert_frame(const EstimationFrame::ConstPtr& odom_frame_) {
             continue;
           }
 
-          graph->emplace_shared<gtsam_points::IntegratedVGICPFactor>(X(keyframe_indices[i]), X(current), voxelmap, keyframes.back()->frame);
+          auto factor = gtsam::make_shared<gtsam_points::IntegratedVGICPFactor>(X(keyframe_indices[i]), X(current), voxelmap, keyframes.back()->frame);
+          factor->set_num_threads(params.num_threads);
+          graph->add(factor);
         }
       }
 #ifdef GTSAM_POINTS_USE_CUDA
